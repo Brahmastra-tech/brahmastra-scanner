@@ -33,3 +33,10 @@ jobs:
           git add data/
           git commit -m "Auto-update F&O DuckDB candles [skip ci]" || exit 0
           git push
+          - name: Fetch Bhavcopy & Update Database
+        run: |
+          python bhavcopy_ingest.py
+
+      - name: Inspect Stored Data
+        run: |
+          python check_data.py
