@@ -16,14 +16,14 @@ TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
 
 def send_telegram_alert(signal: dict):
-    """Sends a formatted, interactive signal alert to Telegram."""
+    """Sends a formatted, interactive signal alert to Telegram for TODAY'S signals only."""
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
         print("⚠️ Telegram credentials not found. Skipping live alert dispatch.")
         return
 
     symbol = signal["symbol"]
     sig_type = signal["type"]
-    date_str = signal["date"]
+    date_str = str(signal["date"])
     entry = signal["entry"]
     sl = signal["sl"]
     target = signal["target"]
@@ -70,7 +70,7 @@ def send_telegram_alert(signal: dict):
 
 
 def run_scanner():
-    """Executes pre-breakout/breakdown strategy logic on DuckDB candle data."""
+    """Executes pre-breakout/breakdown strategy logic across DuckDB candles."""
     if not os.path.exists(DB_PATH):
         print("❌ Database file not found!")
         return
@@ -88,9 +88,8 @@ def run_scanner():
         print("⚠️ No candles available in DuckDB.")
         return
 
-    # Get the latest date present in DB
     latest_date = df.select(pl.max("date")).item()
-    print(f"🔍 Scanning market candles for latest date: {latest_date}...")
+    print(f"🔍 Running Scanner Engine (Latest Date in DB: {latest_date})...")
 
     # 2. Compute 5-day rolling range & 10-day volume average
     df_metrics = df.with_columns([
@@ -102,7 +101,7 @@ def run_scanner():
         ((pl.col("High5") - pl.col("Low5")) / pl.col("PrevClose")).alias("Compression")
     ])
 
-    # 3. Shift metrics by 1 day to check if previous candle was compressed
+    # 3. Shift metrics by 1 day to evaluate setup
     df_shifted = df_metrics.with_columns([
         pl.col("Compression").shift(1).over("symbol").alias("PrevCompression"),
         pl.col("volume").shift(1).over("symbol").alias("PrevVolume"),
@@ -111,8 +110,8 @@ def run_scanner():
         pl.col("Low5").shift(1).over("symbol").alias("PrevLow5")
     ])
 
-    # 4. Filter strictly for TODAY'S signals where previous setup was compressed (<= 0.05 & dry volume)
-    valid_setup = (pl.col("date") == latest_date) & (pl.col("PrevCompression") <= 0.05) & (pl.col("PrevVolume") < pl.col("PrevAvgVol10"))
+    # 4. Filter for setup conditions (Compression <= 0.05 and dry volume)
+    valid_setup = (pl.col("PrevCompression") <= 0.05) & (pl.col("PrevVolume") < pl.col("PrevAvgVol10"))
 
     breakouts = df_shifted.filter(valid_setup & (pl.col("close") > pl.col("PrevHigh5"))).with_columns([
         pl.lit("PRE_BREAKOUT").alias("type"),
@@ -128,18 +127,14 @@ def run_scanner():
         (pl.col("PrevLow5") - (pl.col("PrevHigh5") - pl.col("PrevLow5")) * TARGET_X).alias("target")
     ])
 
-    signals = pl.concat([breakouts, breakdowns])
+    all_signals = pl.concat([breakouts, breakdowns]).sort("date", descending=True)
 
-    if signals.is_empty():
-        print(f"ℹ️ No signals detected for {latest_date}.")
+    if all_signals.is_empty():
+        print("ℹ️ No signals detected.")
         return
 
-    print(f"🔥 FOUND {len(signals)} SIGNALS FOR {latest_date}!")
-
-    # 5. Export signals to CSV archive and trigger Telegram
-    os.makedirs("data", exist_ok=True)
-    
-    signals_to_save = signals.select([
+    # 5. Save COMPLETE historical signals to signals.csv for Dashboard archive
+    signals_to_save = all_signals.select([
         pl.col("date").cast(pl.Utf8),
         pl.col("symbol"),
         pl.col("type"),
@@ -151,17 +146,19 @@ def run_scanner():
         (pl.col("volume") / pl.col("PrevAvgVol10")).round(2).alias("vol_ratio")
     ])
 
-    # Append to signals.csv
-    if os.path.exists(SIGNALS_CSV):
-        existing_df = pl.read_csv(SIGNALS_CSV)
-        updated_df = pl.concat([existing_df, signals_to_save]).unique(subset=["date", "symbol", "type"])
-        updated_df.write_csv(SIGNALS_CSV)
-    else:
-        signals_to_save.write_csv(SIGNALS_CSV)
+    os.makedirs("data", exist_ok=True)
+    signals_to_save.write_csv(SIGNALS_CSV)
+    print(f"✅ Saved {len(signals_to_save)} total historical signals to {SIGNALS_CSV} for Dashboard archive.")
 
-    # Dispatch alerts
-    for sig in signals_to_save.to_dicts():
-        send_telegram_alert(sig)
+    # 6. Filter and dispatch TODAY'S alerts ONLY to Telegram
+    today_signals = signals_to_save.filter(pl.col("date") == str(latest_date))
+    
+    if today_signals.is_empty():
+        print(f"ℹ️ No new signals triggered for today ({latest_date}). Telegram quiet.")
+    else:
+        print(f"📢 Sending {len(today_signals)} Telegram alerts for today ({latest_date})...")
+        for sig in today_signals.to_dicts():
+            send_telegram_alert(sig)
 
 
 if __name__ == "__main__":
