@@ -64,21 +64,22 @@ class BhavcopyIngestor:
 
         df = df.rename({col: col.strip() for col in df.columns})
 
-        # Fixed Column Name: SctySrs
+        # Filter Equity series (SctySrs == "EQ")
         df_filtered = df.filter(pl.col("SctySrs") == "EQ")
         if fno_allowed_symbols:
             df_filtered = df_filtered.filter(pl.col("TckrSymb").is_in(list(fno_allowed_symbols)))
 
+        # Exact NSE UDiFF Column Mapping: OpnPric, HghPric, LwPric, ClsPric
         df_clean = df_filtered.select([
             pl.col("TckrSymb").alias("symbol"),
             pl.lit("1D").alias("timeframe"),
             pl.lit(dt).alias("timestamp"),
-            pl.col("OpnPrc").cast(pl.Float64).alias("open"),
-            pl.col("HghPrc").cast(pl.Float64).alias("high"),
-            pl.col("LwPrc").cast(pl.Float64).alias("low"),
-            pl.col("ClsPrc").cast(pl.Float64).alias("close"),
+            pl.col("OpnPric").cast(pl.Float64).alias("open"),
+            pl.col("HghPric").cast(pl.Float64).alias("high"),
+            pl.col("LwPric").cast(pl.Float64).alias("low"),
+            pl.col("ClsPric").cast(pl.Float64).alias("close"),
             pl.col("TtlTradgVol").cast(pl.Int64).alias("volume"),
-            pl.lit(0).cast(pl.Int64).alias("open_interest")
+            pl.col("OpnIntrst").cast(pl.Int64).alias("open_interest")
         ])
 
         with duckdb.connect(self.db_path) as conn:
