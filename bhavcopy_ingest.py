@@ -32,7 +32,7 @@ class BhavcopyIngestor:
     def get_fno_symbols_list(self) -> set:
         url = "https://nsearchives.nseindia.com/content/fo/fo_mktlots.csv"
         headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
             "Accept": "*/*"
         }
         try:
@@ -42,7 +42,7 @@ class BhavcopyIngestor:
                 fno_symbols = [s.strip() for s in df_fno.select(df_fno.columns[1]).to_series().to_list() if s]
                 return set(fno_symbols)
         except Exception as e:
-            print(f"⚠️ Warning: Could not fetch F&O list ({e}). Falling back to full EQ list.")
+            print(f"⚠️ Warning: Could not fetch F&O list ({e}).")
         return set()
 
     def fetch_and_store_daily(self, date_str: str):
@@ -52,9 +52,8 @@ class BhavcopyIngestor:
         fno_allowed_symbols = self.get_fno_symbols_list()
         url = f"https://nsearchives.nseindia.com/content/cm/BhavCopy_NSE_CM_0_0_0_{date_formatted}_F_0000.csv.zip"
         headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
             "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-            "Accept-Language": "en-US,en;q=0.9",
             "Referer": "https://www.nseindia.com/"
         }
 
@@ -79,7 +78,7 @@ class BhavcopyIngestor:
         if fno_allowed_symbols:
             df_filtered = df_filtered.filter(pl.col("TckrSymb").is_in(list(fno_allowed_symbols)))
 
-        # Exact NSE UDiFF Column Schema
+        # Exact NSE UDiFF Schema Mapping
         df_clean = df_filtered.select([
             pl.col("TckrSymb").alias("symbol"),
             pl.lit("1D").alias("timeframe"),

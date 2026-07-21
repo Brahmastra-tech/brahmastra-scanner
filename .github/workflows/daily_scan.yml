@@ -25,8 +25,15 @@ jobs:
       - name: Fetch Bhavcopy & Update Database
         run: |
           python bhavcopy_ingest.py
-          
-      - name: Inspect Stored Data
+
+      - name: Run Strategy Scanner Engine
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          python scanner_engine.py
+
+      - name: Inspect Stored Data Health
         run: |
           python check_data.py
 
@@ -35,5 +42,5 @@ jobs:
           git config --global user.name "Brahmastra Bot"
           git config --global user.email "bot@technosis.local"
           git add data/
-          git commit -m "Auto-update F&O DuckDB candles [skip ci]" || exit 0
+          git commit -m "Auto-update F&O DuckDB candles & signals [skip ci]" || exit 0
           git push

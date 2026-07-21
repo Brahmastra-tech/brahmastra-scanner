@@ -1,22 +1,98 @@
+import os
 import duckdb
 import polars as pl
-import pandas as pd
+import requests
+from datetime import datetime
 
-def run_pre_breakout_scanner(db_path="data/candles.duckdb", target_x=3.0):
-    conn = duckdb.connect(db_path)
+# ==========================================
+# CONFIGURATION
+# ==========================================
+DB_PATH = "data/candles.duckdb"
+SIGNALS_CSV = "data/signals.csv"
+TARGET_X = 3.0  # Target = SL * 3.0
+
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
+
+
+def send_telegram_alert(signal: dict):
+    """Sends a formatted, interactive signal alert to Telegram."""
+    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
+        print("⚠️ Telegram credentials not found. Skipping live alert dispatch.")
+        return
+
+    symbol = signal["symbol"]
+    sig_type = signal["type"]
+    date_str = signal["date"]
+    entry = signal["entry"]
+    sl = signal["sl"]
+    target = signal["target"]
+    close = signal["close"]
+    vol_ratio = signal["vol_ratio"]
+
+    emoji = "🚀" if sig_type == "PRE_BREAKOUT" else "📉"
     
-    # 1. Load OHLCV data directly from DuckDB into Polars
+    message = (
+        f"{emoji} <b>BRAHMASTRA SIGNAL DETECTED</b>\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n"
+        f"📈 <b>Stock:</b> {symbol} (NSE F&O)\n"
+        f"🎯 <b>Pattern:</b> {sig_type}\n"
+        f"⏱ <b>Timeframe:</b> Daily (1D) | <b>Date:</b> {date_str}\n\n"
+        f"📊 <b>TRADE LEVELS</b>\n"
+        f"• <b>Entry Price :</b> ₹{entry:.2f}\n"
+        f"• <b>Stop Loss   :</b> ₹{sl:.2f}\n"
+        f"• <b>Target (3x) :</b> ₹{target:.2f}\n"
+        f"• <b>Close Price :</b> ₹{close:.2f}\n\n"
+        f"⚡ <b>VOLATILITY METRICS</b>\n"
+        f"• <b>Volume Ratio :</b> {vol_ratio:.2f}x (vs 10 MA)\n"
+        f"• <b>Compression  :</b> {signal['compression']:.4f}\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n"
+        f"🔗 <b>Interactive Links:</b>\n"
+        f"📈 <a href='https://in.tradingview.com/chart/?symbol=NSE:{symbol}'>Open TradingView Chart</a>"
+    )
+
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+    payload = {
+        "chat_id": TELEGRAM_CHAT_ID,
+        "text": message,
+        "parse_mode": "HTML",
+        "disable_web_page_preview": False
+    }
+
+    try:
+        res = requests.post(url, json=payload, timeout=10)
+        if res.status_code == 200:
+            print(f"✓ Telegram alert sent for {symbol} ({sig_type})")
+        else:
+            print(f"❌ Failed to send Telegram alert ({res.status_code}): {res.text}")
+    except Exception as e:
+        print(f"❌ Telegram exception: {e}")
+
+
+def run_scanner():
+    """Executes pre-breakout/breakdown strategy logic on DuckDB candle data."""
+    if not os.path.exists(DB_PATH):
+        print("❌ Database file not found!")
+        return
+
+    conn = duckdb.connect(DB_PATH)
+    
+    # 1. Fetch candles from DuckDB
     df = conn.execute("""
-        SELECT symbol, timeframe, timestamp AS Date, open, high, low, close, volume
+        SELECT symbol, timeframe, CAST(timestamp AS DATE) AS date, open, high, low, close, volume
         FROM ohlcv_candles
         ORDER BY symbol, timestamp ASC
     """).pl()
-    
-    if df.is_empty():
-        print("⚠️ No candle data available in DuckDB.")
-        return pl.DataFrame()
 
-    # 2. Vectorized Rolling Window Computations with Polars
+    if df.is_empty():
+        print("⚠️ No candles available in DuckDB.")
+        return
+
+    # Get the latest date present in DB
+    latest_date = df.select(pl.max("date")).item()
+    print(f"🔍 Scanning market candles for latest date: {latest_date}...")
+
+    # 2. Compute 5-day rolling range & 10-day volume average
     df_metrics = df.with_columns([
         pl.col("high").rolling_max(window_size=5).over("symbol").alias("High5"),
         pl.col("low").rolling_min(window_size=5).over("symbol").alias("Low5"),
@@ -26,7 +102,7 @@ def run_pre_breakout_scanner(db_path="data/candles.duckdb", target_x=3.0):
         ((pl.col("High5") - pl.col("Low5")) / pl.col("PrevClose")).alias("Compression")
     ])
 
-    # 3. Lagged Shift to Check Breakout / Breakdown Conditions
+    # 3. Shift metrics by 1 day to check if previous candle was compressed
     df_shifted = df_metrics.with_columns([
         pl.col("Compression").shift(1).over("symbol").alias("PrevCompression"),
         pl.col("volume").shift(1).over("symbol").alias("PrevVolume"),
@@ -35,29 +111,58 @@ def run_pre_breakout_scanner(db_path="data/candles.duckdb", target_x=3.0):
         pl.col("Low5").shift(1).over("symbol").alias("PrevLow5")
     ])
 
-    # Filter for signals matching compression <= 0.05 & dry volume
-    valid_setup = (pl.col("PrevCompression") <= 0.05) & (pl.col("PrevVolume") < pl.col("PrevAvgVol10"))
-    
+    # 4. Filter strictly for TODAY'S signals where previous setup was compressed (<= 0.05 & dry volume)
+    valid_setup = (pl.col("date") == latest_date) & (pl.col("PrevCompression") <= 0.05) & (pl.col("PrevVolume") < pl.col("PrevAvgVol10"))
+
     breakouts = df_shifted.filter(valid_setup & (pl.col("close") > pl.col("PrevHigh5"))).with_columns([
-        pl.lit("PRE_BREAKOUT").alias("Type"),
-        pl.col("PrevHigh5").alias("Entry"),
-        pl.col("PrevLow5").alias("SL"),
-        (pl.col("PrevHigh5") + (pl.col("PrevHigh5") - pl.col("PrevLow5")) * target_x).alias("Target")
+        pl.lit("PRE_BREAKOUT").alias("type"),
+        pl.col("PrevHigh5").alias("entry"),
+        pl.col("PrevLow5").alias("sl"),
+        (pl.col("PrevHigh5") + (pl.col("PrevHigh5") - pl.col("PrevLow5")) * TARGET_X).alias("target")
     ])
 
     breakdowns = df_shifted.filter(valid_setup & (pl.col("close") < pl.col("PrevLow5"))).with_columns([
-        pl.lit("PRE_BREAKDOWN").alias("Type"),
-        pl.col("PrevLow5").alias("Entry"),
-        pl.col("PrevHigh5").alias("SL"),
-        (pl.col("PrevLow5") - (pl.col("PrevHigh5") - pl.col("PrevLow5")) * target_x).alias("Target")
+        pl.lit("PRE_BREAKDOWN").alias("type"),
+        pl.col("PrevLow5").alias("entry"),
+        pl.col("PrevHigh5").alias("sl"),
+        (pl.col("PrevLow5") - (pl.col("PrevHigh5") - pl.col("PrevLow5")) * TARGET_X).alias("target")
     ])
 
-    signals = pl.concat([breakouts, breakdowns]).sort("Date", descending=True)
+    signals = pl.concat([breakouts, breakdowns])
+
+    if signals.is_empty():
+        print(f"ℹ️ No signals detected for {latest_date}.")
+        return
+
+    print(f"🔥 FOUND {len(signals)} SIGNALS FOR {latest_date}!")
+
+    # 5. Export signals to CSV archive and trigger Telegram
+    os.makedirs("data", exist_ok=True)
     
-    print(f"✅ Scanner Engine Execution Complete! Found {len(signals)} signals.")
-    return signals
+    signals_to_save = signals.select([
+        pl.col("date").cast(pl.Utf8),
+        pl.col("symbol"),
+        pl.col("type"),
+        pl.col("entry").round(2),
+        pl.col("sl").round(2),
+        pl.col("target").round(2),
+        pl.col("close").round(2),
+        pl.col("PrevCompression").round(4).alias("compression"),
+        (pl.col("volume") / pl.col("PrevAvgVol10")).round(2).alias("vol_ratio")
+    ])
+
+    # Append to signals.csv
+    if os.path.exists(SIGNALS_CSV):
+        existing_df = pl.read_csv(SIGNALS_CSV)
+        updated_df = pl.concat([existing_df, signals_to_save]).unique(subset=["date", "symbol", "type"])
+        updated_df.write_csv(SIGNALS_CSV)
+    else:
+        signals_to_save.write_csv(SIGNALS_CSV)
+
+    # Dispatch alerts
+    for sig in signals_to_save.to_dicts():
+        send_telegram_alert(sig)
+
 
 if __name__ == "__main__":
-    signals_df = run_pre_breakout_scanner()
-    if not signals_df.is_empty():
-        print(signals_df.select(["Date", "symbol", "Type", "Entry", "SL", "Target", "close"]))
+    run_scanner()
