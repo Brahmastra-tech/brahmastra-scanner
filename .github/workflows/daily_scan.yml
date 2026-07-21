@@ -26,6 +26,10 @@ jobs:
         run: |
           python bhavcopy_ingest.py
 
+      - name: Inspect Stored Data
+        run: |
+          python check_data.py
+
       - name: Save Updated State to Repository
         run: |
           git config --global user.name "Brahmastra Bot"
@@ -33,10 +37,3 @@ jobs:
           git add data/
           git commit -m "Auto-update F&O DuckDB candles [skip ci]" || exit 0
           git push
-          - name: Fetch Bhavcopy & Update Database
-        run: |
-          python bhavcopy_ingest.py
-
-      - name: Inspect Stored Data
-        run: |
-          python check_data.py
