@@ -1,0 +1,35 @@
+name: Brahmastra Daily Cloud Scan
+
+on:
+  schedule:
+    - cron: '0 13 * * 1-5' # 6:30 PM IST Mon-Fri
+  workflow_dispatch:
+
+jobs:
+  run-scanner:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install Dependencies
+        run: |
+          pip install duckdb polars requests
+
+      - name: Fetch Bhavcopy & Update Database
+        run: |
+          python bhavcopy_ingest.py
+
+      - name: Save Updated State to Repository
+        run: |
+          git config --global user.name "Brahmastra Bot"
+          git config --global user.email "bot@technosis.local"
+          git add data/
+          git commit -m "Auto-update F&O DuckDB candles [skip ci]" || exit 0
+          git push
