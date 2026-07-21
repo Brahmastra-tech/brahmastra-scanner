@@ -64,7 +64,8 @@ class BhavcopyIngestor:
 
         df = df.rename({col: col.strip() for col in df.columns})
 
-        df_filtered = df.filter(pl.col("ScttySrs") == "EQ")
+        # Fixed Column Name: SctySrs
+        df_filtered = df.filter(pl.col("SctySrs") == "EQ")
         if fno_allowed_symbols:
             df_filtered = df_filtered.filter(pl.col("TckrSymb").is_in(list(fno_allowed_symbols)))
 
