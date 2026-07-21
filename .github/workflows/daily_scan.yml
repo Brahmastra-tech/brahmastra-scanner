@@ -22,10 +22,10 @@ jobs:
         run: |
           pip install duckdb polars requests pyarrow
 
-      - name: Fetch Bhavcopy & Update Database
+      - name: Fetch 90-Day Historical Bhavcopy
         run: |
-          python bhavcopy_ingest.py
-
+          python backfill_90days.py
+          
       - name: Inspect Stored Data
         run: |
           python check_data.py
