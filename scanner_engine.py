@@ -26,7 +26,9 @@ def scan_symbol_exact(symbol, df_sym):
 
     df = df_sym.copy().sort_values("Date").reset_index(drop=True)
 
-    # 1. Detect Delivery Columns Dynamically
+    # -------------------------------------------------------------
+    # 1. STRICT DELIVERY DATA VERIFICATION (NO FAKE / ASSUMED DATA)
+    # -------------------------------------------------------------
     deliv_qty_col = None
     for col in ['delivery_qty', 'delivery_volume', 'DeliveryQty', 'DeliveryVolume']:
         if col in df.columns:
@@ -39,15 +41,12 @@ def scan_symbol_exact(symbol, df_sym):
             deliv_pct_col = col
             break
 
-    if deliv_qty_col:
-        df['DeliveryQty'] = pd.to_numeric(df[deliv_qty_col], errors='coerce').fillna(0)
-    else:
-        df['DeliveryQty'] = df['Volume'] * 0.45
+    # If delivery columns are missing completely, reject scanning this symbol
+    if deliv_qty_col is None or deliv_pct_col is None:
+        return alerts
 
-    if deliv_pct_col:
-        df['DeliveryPct'] = pd.to_numeric(df[deliv_pct_col], errors='coerce').fillna(0)
-    else:
-        df['DeliveryPct'] = 50.0
+    df['DeliveryQty'] = pd.to_numeric(df[deliv_qty_col], errors='coerce')
+    df['DeliveryPct'] = pd.to_numeric(df[deliv_pct_col], errors='coerce')
 
     df['Prev_DelivQty'] = df['DeliveryQty'].shift(1)
 
@@ -61,32 +60,33 @@ def scan_symbol_exact(symbol, df_sym):
         low_p = float(row["Low"])
         close_p = float(row["Close"])
         volume = float(row["Volume"])
+
+        # Check for NaN in current row delivery fields
+        if pd.isna(row["DeliveryQty"]) or pd.isna(row["DeliveryPct"]) or pd.isna(row["Prev_DelivQty"]):
+            continue
+
         deliv_qty = float(row["DeliveryQty"])
         prev_deliv_qty = float(row["Prev_DelivQty"])
         deliv_pct = float(row["DeliveryPct"])
 
-        # -------------------------------------------------------------
-        # ACCUMULATION SCANNER CONDITIONS (6 Golden Rules)
-        # -------------------------------------------------------------
-        c1_vol = volume >= 300000                                 # Liquidity floor
-        
-        # Delivery Spike check (handles 0 prev volume gracefully)
-        if prev_deliv_qty > 0:
-            deliv_spike_ratio = deliv_qty / prev_deliv_qty
-            c2_deliv_spike = deliv_spike_ratio >= 1.5
-        else:
-            deliv_spike_ratio = 1.5
-            c2_deliv_spike = True
+        # Reject if previous delivery quantity was zero or invalid
+        if prev_deliv_qty <= 0:
+            continue
 
-        c3_deliv_pct = deliv_pct >= 45.0                           # Delivery %
-        c4_close_min = close_p >= (open_p * 0.985)                # Open-Close candle range
-        c5_close_max = close_p <= (open_p * 1.025)
-        c6_range_squeeze = (high_p - low_p) <= (close_p * 0.04)   # Range Squeeze (High - Low <= 4%)
+        # -------------------------------------------------------------
+        # EXACT 6 DELIVERY ACCUMULATION RULES
+        # -------------------------------------------------------------
+        c1_vol = volume > 500000                                  # [0] Volume > 500000
+        c2_deliv_spike = deliv_qty > (prev_deliv_qty * 3.0)      # [0] Delivery Vol > Prev Delivery Vol * 3
+        c3_deliv_pct = deliv_pct > 55.0                           # [0] Delivery % > 55
+        c4_close_min = close_p >= (open_p * 0.99)                # [0] Close >= Open * 0.99
+        c5_close_max = close_p <= (open_p * 1.02)                # [0] Close <= Open * 1.02
+        c6_range_squeeze = (high_p - low_p) <= (close_p * 0.03)   # [0] High - Low <= Close * 0.03
 
         if not (c1_vol and c2_deliv_spike and c3_deliv_pct and c4_close_min and c5_close_max and c6_range_squeeze):
             continue
 
-        key = (symbol, row["Date"])
+        key = (symbol, "DELIVERY_ACCUMULATION")
 
         if key not in seen:
             seen.add(key)
@@ -94,6 +94,7 @@ def scan_symbol_exact(symbol, df_sym):
             entry = round(high_p, 2)
             sl = round(low_p, 2)
             target = round(entry + (entry - sl) * TARGET_X, 2)
+            spike_ratio = round(deliv_qty / prev_deliv_qty, 2)
 
             alerts.append({
                 "Date": pd.to_datetime(row["Date"]).strftime("%d-%m-%Y"),
@@ -108,7 +109,7 @@ def scan_symbol_exact(symbol, df_sym):
                 "Volume": int(volume),
                 "DeliveryQty": int(deliv_qty),
                 "DeliveryPct": round(deliv_pct, 2),
-                "DelivSpikeRatio": round(deliv_spike_ratio, 2)
+                "DelivSpikeRatio": spike_ratio
             })
 
     return alerts
@@ -136,7 +137,7 @@ def send_telegram_alert(signal: dict):
         f"{emoji} <b>BRAHMASTRA ACCUMULATION WATCHLIST</b>\n"
         f"━━━━━━━━━━━━━━━━━━━━\n"
         f"📈 <b>Stock:</b> {symbol} (NSE F&O)\n"
-        f"🎯 <b>Pattern:</b> Delivery Accumulation Squeeze\n"
+        f"🎯 <b>Pattern:</b> 3x Delivery Accumulation Squeeze\n"
         f"⏱ <b>Setup Date:</b> {setup_date}\n\n"
         f"📊 <b>ACTIONABLE TRIGGER LEVELS</b>\n"
         f"• <b>Trigger Buy Above   :</b> ₹{entry:.2f}\n"
@@ -202,7 +203,7 @@ def send_summary_telegram(signals_today: list, date_str: str):
 
 
 def run_scanner():
-    print("🚀 Running New Delivery Accumulation Scanner Engine...")
+    print("🚀 Running Strict Delivery Accumulation Scanner Engine...")
 
     if not os.path.exists(DB_PATH):
         print(f"❌ Database file not found at {DB_PATH}!")
@@ -210,7 +211,6 @@ def run_scanner():
 
     conn = duckdb.connect(DB_PATH)
 
-    # Load DuckDB table flexibly
     df_raw = conn.execute("""
         SELECT * FROM ohlcv_candles ORDER BY symbol, timestamp ASC
     """).df()
@@ -219,8 +219,7 @@ def run_scanner():
         print("⚠️ No candles available in DuckDB.")
         return
 
-    # Standardize Column Names
-    col_map = {c: c.capitalize() for c in df_raw.columns}
+    # Standardize Basic Column Names
     df_raw.rename(columns={
         'symbol': 'Symbol', 'timestamp': 'Date', 'open': 'Open',
         'high': 'High', 'low': 'Low', 'close': 'Close', 'volume': 'Volume'
@@ -232,7 +231,6 @@ def run_scanner():
     symbols = df_raw['Symbol'].unique()
     all_signals = []
 
-    # 1. Run new scanner strategy over ALL historical candles
     for sym in symbols:
         df_sym = df_raw[df_raw['Symbol'] == sym]
         alerts = scan_symbol_exact(sym, df_sym)
@@ -242,25 +240,24 @@ def run_scanner():
     os.makedirs("data", exist_ok=True)
 
     if not all_signals:
-        print("ℹ️ No signals matched conditions overall.")
+        print("ℹ️ No signals matched strict conditions overall.")
         pd.DataFrame(columns=['Date', 'Symbol', 'Timeframe', 'Type', 'Pattern', 'Entry', 'SL', 'Target', 'Close', 'Volume', 'DeliveryQty', 'DeliveryPct', 'DelivSpikeRatio']).to_csv(SIGNALS_CSV, index=False)
         send_summary_telegram([], latest_date)
         return
 
-    # 2. OVERWRITE signals.csv with NEW strategy history (Removes old scanner results)
+    # Export clean history to CSV
     export_df = pd.DataFrame(all_signals)
     date_col = "Date" if "Date" in export_df.columns else "date"
     export_df["Date_DT"] = pd.to_datetime(export_df[date_col], format="%d-%m-%Y")
 
     export_df = export_df.sort_values("Date_DT", ascending=False).drop(columns=["Date_DT"])
     export_df.to_csv(SIGNALS_CSV, index=False)
-    print(f"✅ Saved {len(export_df)} total NEW delivery accumulation signals to {SIGNALS_CSV}.")
+    print(f"✅ Saved {len(export_df)} strict historical signals to {SIGNALS_CSV}.")
 
-    # 3. Extract today's candidates
+    # Extract today's signals
     today_signals = export_df[export_df[date_col] == latest_date].to_dict('records')
     print(f"📊 Candidates for Today ({latest_date}): {len(today_signals)}")
 
-    # 4. Dispatch Telegram alerts & summary
     try:
         for sig in today_signals:
             send_telegram_alert(sig)
