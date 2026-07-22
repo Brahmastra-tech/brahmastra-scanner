@@ -21,7 +21,7 @@ jobs:
       - name: Install Dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install duckdb polars pandas numpy requests yfinance
+          pip install duckdb polars pandas numpy requests yfinance pyarrow
       - name: Fetch Bhavcopy & Update Database
         run: |
           python bhavcopy_ingest.py
