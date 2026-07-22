@@ -68,7 +68,7 @@ def scan_symbol_exact(symbol, df_sym):
         # -------------------------------------------------------------
         # ACCUMULATION SCANNER CONDITIONS (6 Golden Rules)
         # -------------------------------------------------------------
-        c1_vol = volume >= 500000                                 # Liquidity floor
+        c1_vol = volume >= 300000                                 # Liquidity floor
         
         # Delivery Spike check (handles 0 prev volume gracefully)
         if prev_deliv_qty > 0:
