@@ -20,8 +20,8 @@ jobs:
 
       - name: Install Dependencies
         run: |
-          pip install duckdb polars requests pyarrow
-
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
       - name: Fetch Bhavcopy & Update Database
         run: |
           python bhavcopy_ingest.py
