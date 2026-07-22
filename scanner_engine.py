@@ -184,8 +184,6 @@ def send_telegram_alert(signal: dict):
     adx = signal["adx"]
 
     emoji = "🚀" if sig_type == "PRE_BREAKOUT" else "📉"
-    
-    # Exact NSE TradingView chart URL format preventing AAPL fallback
     chart_url = f"https://in.tradingview.com/chart/?symbol=NSE:{symbol}"
 
     message = (
@@ -219,7 +217,7 @@ def send_telegram_alert(signal: dict):
 
 
 def send_summary_telegram(signal_count: int, date_str: str):
-    """Sends summary message to Telegram (handles 0 stock scenario explicitly)."""
+    """Sends summary message to Telegram (ALWAYS SENT, INCLUDING 0 STOCK DAYS)."""
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
         return
 
@@ -304,7 +302,7 @@ def run_scanner():
     else:
         print(f"ℹ️ 0 signals triggered today ({latest_date}).")
 
-    # 6. Send final summary message (handles 0 stock days cleanly)
+    # 6. ALWAYS send final summary message (handles 0 stock days cleanly)
     send_summary_telegram(len(today_signals), latest_date)
 
 
