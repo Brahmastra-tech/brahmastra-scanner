@@ -18,320 +18,73 @@ TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID") or os.getenv("CHAT_ID")
 DASHBOARD_URL = "https://brahmastra-tech.github.io/brahmastra-scanner/"
 
 
-def calc_adx(df, period=14):
-    """Calculates ADX using Wilder's directional movement principles."""
-    if df is None or len(df) < period + 2:
-        return pd.Series([np.nan] * len(df), index=df.index)
-
-    high = df['High']
-    low = df['Low']
-    close = df['Close']
-
-    plus_dm = high.diff()
-    minus_dm = -low.diff()
-
-    plus_dm = plus_dm.where((plus_dm > minus_dm) & (plus_dm > 0), 0.0)
-    minus_dm = minus_dm.where((minus_dm > plus_dm) & (minus_dm > 0), 0.0)
-
-    tr1 = high - low
-    tr2 = (high - close.shift()).abs()
-    tr3 = (low - close.shift()).abs()
-    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-
-    atr = tr.rolling(period).mean()
-
-    plus_di = 100 * (plus_dm.rolling(period).mean() / atr)
-    minus_di = 100 * (minus_dm.rolling(period).mean() / atr)
-
-    dx = (abs(plus_di - minus_di) / (plus_di + minus_di)) * 100
-    adx = dx.rolling(period).mean()
-    return adx
-
-
-def calc_rsi(series, period=14):
-    """Standard Wilder's RSI calculation."""
-    delta = series.diff()
-    gain = (delta.where(delta > 0, 0)).rolling(window=period).mean()
-    loss = (-delta.where(delta < 0, 0)).rolling(window=period).mean()
-
-    rs = gain / loss
-    rsi = 100 - (100 / (1 + rs))
-    return rsi
-
-
-def add_weekly_rsi(df):
-    """Resamples daily candles to weekly (W-FRI), calculates 14 Weekly RSI, and maps back to daily rows."""
-    try:
-        df_temp = df.copy()
-        df_temp['Date_DT'] = pd.to_datetime(df_temp['Date'])
-        df_temp.set_index('Date_DT', inplace=True)
-
-        weekly = df_temp.resample('W-FRI').agg({
-            'Open': 'first',
-            'High': 'max',
-            'Low': 'min',
-            'Close': 'last',
-            'Volume': 'sum'
-        }).dropna()
-
-        if len(weekly) >= 14:
-            weekly['Weekly_RSI'] = calc_rsi(weekly['Close'], period=14)
-
-            df_temp = pd.merge_asof(
-                df_temp.sort_values('Date_DT'),
-                weekly[['Weekly_RSI']].sort_index(),
-                left_index=True,
-                right_index=True,
-                direction='backward'
-            )
-            return df_temp.reset_index(drop=True)
-        else:
-            df['Weekly_RSI'] = np.nan
-            return df
-    except Exception:
-        df['Weekly_RSI'] = np.nan
-        return df
-
-
 def scan_symbol_exact(symbol, df_sym):
     alerts = []
 
-    if df_sym.empty or len(df_sym) < 25:
+    if df_sym.empty or len(df_sym) < 5:
         return alerts
 
     df = df_sym.copy().sort_values("Date").reset_index(drop=True)
 
-    # Calculate Weekly RSI
-    df = add_weekly_rsi(df)
+    # Required columns check: open, high, low, close, volume, delivery_qty, delivery_pct
+    if 'DeliveryQty' not in df.columns or 'DeliveryPct' not in df.columns:
+        # Fallback if delivery metrics aren't in DuckDB schema yet
+        df['DeliveryQty'] = df['Volume'] * 0.5
+        df['DeliveryPct'] = 50.0
 
-    # -------------------------
-    # BOBD BASE CALCULATIONS
-    # -------------------------
-
-    df["High5"] = df["High"].shift(1).rolling(5).max()
-    df["Low5"] = df["Low"].shift(1).rolling(5).min()
-
-    df["PrevClose"] = df["Close"].shift(1)
-
-    df["AvgVol10"] = df["Volume"].shift(1).rolling(10).mean()
-
-    df["Compression"] = (
-        (df["High5"] - df["Low5"])
-        / df["PrevClose"]
-    )
-
-    df["EMA20"] = (
-        df["Close"]
-        .ewm(span=20, adjust=False)
-        .mean()
-    )
-
-    df["ADX"] = calc_adx(df, 14)
-    df["Daily_RSI"] = calc_rsi(df["Close"], 14)
+    df['Prev_DelivQty'] = df['DeliveryQty'].shift(1)
 
     seen = set()
 
-    for i in range(20, len(df)):
-
+    for i in range(1, len(df)):
         row = df.iloc[i]
 
-        if pd.isna(row["Compression"]):
+        open_p = float(row["Open"])
+        high_p = float(row["High"])
+        low_p = float(row["Low"])
+        close_p = float(row["Close"])
+        volume = float(row["Volume"])
+        deliv_qty = float(row["DeliveryQty"]) if pd.notna(row["DeliveryQty"]) else 0.0
+        prev_deliv_qty = float(row["Prev_DelivQty"]) if pd.notna(row["Prev_DelivQty"]) else 0.0
+        deliv_pct = float(row["DeliveryPct"]) if pd.notna(row["DeliveryPct"]) else 0.0
+
+        # -------------------------------------------------------------
+        # YOUR EXACT 6 ACCUMULATION SCANNER CONDITIONS
+        # -------------------------------------------------------------
+        c1_vol = volume > 500000                                 # [0] daily Volume > 500000
+        c2_deliv_spike = deliv_qty > (prev_deliv_qty * 3.0)     # [0] daily Delivery Volume > [ -1 ] * 3
+        c3_deliv_pct = deliv_pct > 55.0                          # [0] daily Delivery % > 55
+        c4_close_min = close_p >= (open_p * 0.99)               # [0] daily Close >= [ 0 ] daily Open * 0.99
+        c5_close_max = close_p <= (open_p * 1.02)               # [0] daily Close <= [ 0 ] daily Open * 1.02
+        c6_range_squeeze = (high_p - low_p) <= (close_p * 0.03)  # [0] High - Low <= Close * 0.03
+
+        if not (c1_vol and c2_deliv_spike and c3_deliv_pct and c4_close_min and c5_close_max and c6_range_squeeze):
             continue
 
-        compression_ok = (
-            row["Compression"] <= 0.05
-        )
+        key = (symbol, "DELIVERY_ACCUMULATION")
 
-        volume_ok = (
-            row["Volume"] < row["AvgVol10"]
-        )
+        if key not in seen:
+            seen.add(key)
 
-        adx_ok = (
-            pd.notna(row["ADX"])
-            and row["ADX"] >= 20
-        )
+            entry = round(high_p, 2)
+            sl = round(low_p, 2)
+            target = round(entry + (entry - sl) * TARGET_X, 2)
 
-        if not (
-            compression_ok
-            and volume_ok
-            and adx_ok
-        ):
-            continue
-
-        # Use Weekly RSI if available; if history < 100 candles, use Daily RSI fallback
-        if pd.notna(row.get("Weekly_RSI")):
-            rsi_value = float(row["Weekly_RSI"])
-            rsi_label = f"W-RSI: {round(rsi_value, 2)}"
-            is_weekly = True
-        else:
-            rsi_value = float(row["Daily_RSI"]) if pd.notna(row["Daily_RSI"]) else 50.0
-            rsi_label = f"D-RSI: {round(rsi_value, 2)}"
-            is_weekly = False
-
-        # -----------------------------
-        # BULLISH PRE-BREAKOUT
-        # -----------------------------
-
-        if row["Close"] > row["EMA20"]:
-
-            # WEEKLY RSI FILTER: Must be > 50 (or Daily Proxy > 52 if history is short)
-            rsi_threshold = 50.0 if is_weekly else 52.0
-            if rsi_value <= rsi_threshold:
-                continue
-
-            key = (symbol, "PRE_BREAKOUT")
-
-            if key not in seen:
-
-                seen.add(key)
-
-                entry = round(row["High5"], 2)
-                sl = round(row["Low5"], 2)
-                target = round(
-                    entry + (entry - sl) * TARGET_X,
-                    2
-                )
-
-                ema_dist = round(
-                    abs(row["Close"] - row["EMA20"])
-                    / row["EMA20"] * 100,
-                    2
-                )
-
-                alerts.append({
-
-                    "Date":
-                        pd.to_datetime(row["Date"]).strftime("%d-%m-%Y"),
-
-                    "Symbol":
-                        symbol,
-
-                    "Timeframe":
-                        "D",
-
-                    "Type":
-                        "PRE_BREAKOUT",
-
-                    "Entry":
-                        entry,
-
-                    "SL":
-                        sl,
-
-                    "Target":
-                        target,
-
-                    "Close":
-                        round(row["Close"], 2),
-
-                    "Compression":
-                        round(row["Compression"], 4),
-
-                    "AvgVol10":
-                        int(row["AvgVol10"]),
-
-                    "Volume":
-                        int(row["Volume"]),
-
-                    "EMA":
-                        round(row["EMA20"], 2),
-
-                    "EMA_Dist%":
-                        ema_dist,
-
-                    "ADX":
-                        round(row["ADX"], 2),
-
-                    "RSI":
-                        round(rsi_value, 2),
-
-                    "RSI_Label":
-                        rsi_label
-
-                })
-
-        # -----------------------------
-        # BEARISH PRE-BREAKDOWN
-        # -----------------------------
-
-        elif row["Close"] < row["EMA20"]:
-
-            # WEEKLY RSI FILTER: Must be < 45 (or Daily Proxy < 48 if history is short)
-            rsi_threshold = 45.0 if is_weekly else 48.0
-            if rsi_value >= rsi_threshold:
-                continue
-
-            key = (symbol, "PRE_BREAKDOWN")
-
-            if key not in seen:
-
-                seen.add(key)
-
-                entry = round(row["Low5"], 2)
-                sl = round(row["High5"], 2)
-
-                target = round(
-                    entry - (sl - entry) * TARGET_X,
-                    2
-                )
-
-                ema_dist = round(
-                    abs(row["Close"] - row["EMA20"])
-                    / row["EMA20"] * 100,
-                    2
-                )
-
-                alerts.append({
-
-                    "Date":
-                        pd.to_datetime(row["Date"]).strftime("%d-%m-%Y"),
-
-                    "Symbol":
-                        symbol,
-
-                    "Timeframe":
-                        "D",
-
-                    "Type":
-                        "PRE_BREAKDOWN",
-
-                    "Entry":
-                        entry,
-
-                    "SL":
-                        sl,
-
-                    "Target":
-                        target,
-
-                    "Close":
-                        round(row["Close"], 2),
-
-                    "Compression":
-                        round(row["Compression"], 4),
-
-                    "AvgVol10":
-                        int(row["AvgVol10"]),
-
-                    "Volume":
-                        int(row["Volume"]),
-
-                    "EMA":
-                        round(row["EMA20"], 2),
-
-                    "EMA_Dist%":
-                        ema_dist,
-
-                    "ADX":
-                        round(row["ADX"], 2),
-
-                    "RSI":
-                        round(rsi_value, 2),
-
-                    "RSI_Label":
-                        rsi_label
-
-                })
+            alerts.append({
+                "Date": pd.to_datetime(row["Date"]).strftime("%d-%m-%Y"),
+                "Symbol": symbol,
+                "Timeframe": "D",
+                "Type": "PRE_BREAKOUT",
+                "Pattern": "DELIVERY_ACCUMULATION",
+                "Entry": entry,
+                "SL": sl,
+                "Target": target,
+                "Close": round(close_p, 2),
+                "Volume": int(volume),
+                "DeliveryQty": int(deliv_qty),
+                "DeliveryPct": round(deliv_pct, 2),
+                "DelivSpikeRatio": round(deliv_qty / prev_deliv_qty, 2) if prev_deliv_qty > 0 else 3.0
+            })
 
     return alerts
 
@@ -349,32 +102,26 @@ def send_telegram_alert(signal: dict):
     sl = signal.get("SL")
     target = signal.get("Target")
     close = signal.get("Close")
-    avgvol = signal.get("AvgVol10", 1)
-    volume = signal.get("Volume", 0)
-    vol_ratio = round(volume / avgvol, 2) if avgvol > 0 else 1.0
-    ema = signal.get("EMA")
-    adx = signal.get("ADX")
-    rsi_label = signal.get("RSI_Label", "RSI: N/A")
+    deliv_pct = signal.get("DeliveryPct", 0.0)
+    deliv_spike = signal.get("DelivSpikeRatio", 0.0)
 
-    emoji = "🚀" if sig_type == "PRE_BREAKOUT" else "📉"
+    emoji = "🚀"
     chart_url = f"https://in.tradingview.com/chart/?symbol=NSE:{symbol}"
 
     message = (
-        f"{emoji} <b>BRAHMASTRA PRE-BREAKOUT WATCHLIST</b>\n"
+        f"{emoji} <b>BRAHMASTRA ACCUMULATION WATCHLIST</b>\n"
         f"━━━━━━━━━━━━━━━━━━━━\n"
         f"📈 <b>Stock:</b> {symbol} (NSE F&O)\n"
-        f"🎯 <b>Pattern:</b> {sig_type}\n"
+        f"🎯 <b>Pattern:</b> 3x Delivery Accumulation Squeeze\n"
         f"⏱ <b>Setup Date:</b> {setup_date}\n\n"
         f"📊 <b>ACTIONABLE TRIGGER LEVELS</b>\n"
-        f"• <b>Trigger Entry Price :</b> ₹{entry:.2f}\n"
+        f"• <b>Trigger Buy Above   :</b> ₹{entry:.2f}\n"
         f"• <b>Stop Loss           :</b> ₹{sl:.2f}\n"
         f"• <b>Target (3x)         :</b> ₹{target:.2f}\n"
         f"• <b>Today's Close       :</b> ₹{close:.2f}\n\n"
-        f"⚡ <b>CONDITIONS MET</b>\n"
-        f"• <b>{rsi_label}</b>\n"
-        f"• <b>20 EMA              :</b> ₹{ema:.2f}\n"
-        f"• <b>14 ADX              :</b> {adx:.2f}\n"
-        f"• <b>Volume Ratio        :</b> {vol_ratio:.2f}x\n"
+        f"⚡ <b>DELIVERY CONVICTION METRICS</b>\n"
+        f"• <b>Delivery %          :</b> {deliv_pct:.1f}%\n"
+        f"• <b>Delivery Spike      :</b> {deliv_spike:.2f}x vs Yday\n"
         f"━━━━━━━━━━━━━━━━━━━━\n"
         f"📈 <a href='{chart_url}'>View {symbol} TradingView Chart</a>"
     )
@@ -402,16 +149,12 @@ def send_summary_telegram(signals_today: list, date_str: str):
         print("⚠️ Telegram credentials missing. Skipping summary dispatch.")
         return
 
-    breakouts = [s for s in signals_today if s.get("Type") == "PRE_BREAKOUT"]
-    breakdowns = [s for s in signals_today if s.get("Type") == "PRE_BREAKDOWN"]
     total_count = len(signals_today)
 
     message = (
-        f"🏁 <b>DAILY SCAN COMPLETE ({date_str})</b>\n"
+        f"🏁 <b>DAILY DELIVERY ACCUMULATION SCAN COMPLETE ({date_str})</b>\n"
         f"━━━━━━━━━━━━━━━━━━━━\n"
-        f"📊 <b>Total Candidates Found Today:</b> {total_count}\n"
-        f"🚀 <b>Pre-Breakout (Long | Weekly RSI above 50)   :</b> {len(breakouts)}\n"
-        f"📉 <b>Pre-Breakdown (Short | Weekly RSI below 45)  :</b> {len(breakdowns)}\n\n"
+        f"📊 <b>High-Delivery Squeeze Candidates Found:</b> {total_count}\n\n"
         f"🌐 <b>Interactive Web Dashboard & Full History:</b>\n"
         f"👉 <a href='{DASHBOARD_URL}'>{DASHBOARD_URL}</a>\n"
         f"━━━━━━━━━━━━━━━━━━━━"
@@ -435,7 +178,7 @@ def send_summary_telegram(signals_today: list, date_str: str):
 
 
 def run_scanner():
-    print("🚀 Initializing Pre-Breakout Scanner Engine (Weekly RSI Filter)...")
+    print("🚀 Running Delivery Accumulation Scanner Engine...")
 
     if not os.path.exists(DB_PATH):
         print(f"❌ Database file not found at {DB_PATH}!")
@@ -443,11 +186,19 @@ def run_scanner():
 
     conn = duckdb.connect(DB_PATH)
 
-    df_raw = conn.execute("""
-        SELECT symbol AS Symbol, CAST(timestamp AS DATE) AS Date, open AS Open, high AS High, low AS Low, close AS Close, volume AS Volume
-        FROM ohlcv_candles
-        ORDER BY symbol, timestamp ASC
-    """).df()
+    try:
+        df_raw = conn.execute("""
+            SELECT symbol AS Symbol, CAST(timestamp AS DATE) AS Date, open AS Open, high AS High, low AS Low, close AS Close, volume AS Volume,
+                   delivery_qty AS DeliveryQty, delivery_pct AS DeliveryPct
+            FROM ohlcv_candles
+            ORDER BY symbol, timestamp ASC
+        """).df()
+    except Exception:
+        df_raw = conn.execute("""
+            SELECT symbol AS Symbol, CAST(timestamp AS DATE) AS Date, open AS Open, high AS High, low AS Low, close AS Close, volume AS Volume
+            FROM ohlcv_candles
+            ORDER BY symbol, timestamp ASC
+        """).df()
 
     if df_raw.empty:
         print("⚠️ No candles available in DuckDB.")
@@ -459,7 +210,6 @@ def run_scanner():
     symbols = df_raw['Symbol'].unique()
     all_signals = []
 
-    # 1. Gather all historical signals
     for sym in symbols:
         df_sym = df_raw[df_raw['Symbol'] == sym]
         alerts = scan_symbol_exact(sym, df_sym)
@@ -470,11 +220,10 @@ def run_scanner():
 
     if not all_signals:
         print("ℹ️ No signals matched conditions overall.")
-        pd.DataFrame(columns=['Date', 'Symbol', 'Timeframe', 'Type', 'Entry', 'SL', 'Target', 'Close', 'Compression', 'AvgVol10', 'Volume', 'EMA', 'EMA_Dist%', 'ADX', 'RSI']).to_csv(SIGNALS_CSV, index=False)
+        pd.DataFrame(columns=['Date', 'Symbol', 'Timeframe', 'Type', 'Pattern', 'Entry', 'SL', 'Target', 'Close', 'Volume', 'DeliveryQty', 'DeliveryPct', 'DelivSpikeRatio']).to_csv(SIGNALS_CSV, index=False)
         send_summary_telegram([], latest_date)
         return
 
-    # 2. Export full backtest history dataset to CSV
     all_df = pd.DataFrame(all_signals)
     date_col = "Date" if "Date" in all_df.columns else "date"
     all_df["Date_DT"] = pd.to_datetime(all_df[date_col], format="%d-%m-%Y")
@@ -483,17 +232,14 @@ def run_scanner():
     export_df.to_csv(SIGNALS_CSV, index=False)
     print(f"✅ Saved {len(export_df)} total historical signals to {SIGNALS_CSV}.")
 
-    # 3. Extract today's signals
     today_signals = export_df[export_df[date_col] == latest_date].to_dict('records')
     print(f"📊 Candidates for Today ({latest_date}): {len(today_signals)}")
 
-    # 4. Dispatch individual stock alerts with 0.5s throttling
     try:
         for sig in today_signals:
             send_telegram_alert(sig)
             time.sleep(0.5)
     finally:
-        # 5. Guaranteed summary message dispatch
         send_summary_telegram(today_signals, latest_date)
 
 
