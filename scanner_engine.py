@@ -27,7 +27,7 @@ def scan_symbol_exact(symbol, df_sym):
     df = df_sym.copy().sort_values("Date").reset_index(drop=True)
 
     # -------------------------------------------------------------
-    # 1. STRICT DELIVERY DATA VERIFICATION (NO FAKE / ASSUMED DATA)
+    # 1. STRICT DELIVERY DATA VERIFICATION
     # -------------------------------------------------------------
     deliv_qty_col = None
     for col in ['delivery_qty', 'delivery_volume', 'DeliveryQty', 'DeliveryVolume']:
@@ -41,7 +41,7 @@ def scan_symbol_exact(symbol, df_sym):
             deliv_pct_col = col
             break
 
-    # If delivery columns are missing completely, reject scanning this symbol
+    # Strictly reject scanning if real delivery columns are missing
     if deliv_qty_col is None or deliv_pct_col is None:
         return alerts
 
@@ -61,7 +61,7 @@ def scan_symbol_exact(symbol, df_sym):
         close_p = float(row["Close"])
         volume = float(row["Volume"])
 
-        # Check for NaN in current row delivery fields
+        # Skip rows with missing delivery data
         if pd.isna(row["DeliveryQty"]) or pd.isna(row["DeliveryPct"]) or pd.isna(row["Prev_DelivQty"]):
             continue
 
@@ -86,7 +86,9 @@ def scan_symbol_exact(symbol, df_sym):
         if not (c1_vol and c2_deliv_spike and c3_deliv_pct and c4_close_min and c5_close_max and c6_range_squeeze):
             continue
 
-        key = (symbol, "DELIVERY_ACCUMULATION")
+        # FIX 1: Include row["Date"] in the key so new dates aren't skipped!
+        date_str = pd.to_datetime(row["Date"]).strftime("%d-%m-%Y")
+        key = (symbol, date_str, "DELIVERY_ACCUMULATION")
 
         if key not in seen:
             seen.add(key)
@@ -97,7 +99,7 @@ def scan_symbol_exact(symbol, df_sym):
             spike_ratio = round(deliv_qty / prev_deliv_qty, 2)
 
             alerts.append({
-                "Date": pd.to_datetime(row["Date"]).strftime("%d-%m-%Y"),
+                "Date": date_str,
                 "Symbol": symbol,
                 "Timeframe": "D",
                 "Type": "PRE_BREAKOUT",
@@ -203,7 +205,7 @@ def send_summary_telegram(signals_today: list, date_str: str):
 
 
 def run_scanner():
-    print("🚀 Running Strict Delivery Accumulation Scanner Engine...")
+    print("🚀 Running Fixed Delivery Accumulation Scanner Engine...")
 
     if not os.path.exists(DB_PATH):
         print(f"❌ Database file not found at {DB_PATH}!")
@@ -219,14 +221,14 @@ def run_scanner():
         print("⚠️ No candles available in DuckDB.")
         return
 
-    # Standardize Basic Column Names
+    # Standardize Column Names
     df_raw.rename(columns={
         'symbol': 'Symbol', 'timestamp': 'Date', 'open': 'Open',
         'high': 'High', 'low': 'Low', 'close': 'Close', 'volume': 'Volume'
     }, inplace=True)
 
-    latest_date = pd.to_datetime(df_raw['Date'].max()).strftime("%d-%m-%Y")
-    print(f"🔍 Database Market Date: {latest_date} | Total Symbols: {df_raw['Symbol'].nunique()}")
+    latest_date_str = pd.to_datetime(df_raw['Date'].max()).strftime("%d-%m-%Y")
+    print(f"🔍 Database Market Date: {latest_date_str} | Total Symbols: {df_raw['Symbol'].nunique()}")
 
     symbols = df_raw['Symbol'].unique()
     all_signals = []
@@ -242,7 +244,7 @@ def run_scanner():
     if not all_signals:
         print("ℹ️ No signals matched strict conditions overall.")
         pd.DataFrame(columns=['Date', 'Symbol', 'Timeframe', 'Type', 'Pattern', 'Entry', 'SL', 'Target', 'Close', 'Volume', 'DeliveryQty', 'DeliveryPct', 'DelivSpikeRatio']).to_csv(SIGNALS_CSV, index=False)
-        send_summary_telegram([], latest_date)
+        send_summary_telegram([], latest_date_str)
         return
 
     # Export clean history to CSV
@@ -252,18 +254,18 @@ def run_scanner():
 
     export_df = export_df.sort_values("Date_DT", ascending=False).drop(columns=["Date_DT"])
     export_df.to_csv(SIGNALS_CSV, index=False)
-    print(f"✅ Saved {len(export_df)} strict historical signals to {SIGNALS_CSV}.")
+    print(f"✅ Saved {len(export_df)} total historical signals to {SIGNALS_CSV}.")
 
-    # Extract today's signals
-    today_signals = export_df[export_df[date_col] == latest_date].to_dict('records')
-    print(f"📊 Candidates for Today ({latest_date}): {len(today_signals)}")
+    # Extract today's signals accurately using matching formatted strings
+    today_signals = export_df[export_df[date_col] == latest_date_str].to_dict('records')
+    print(f"📊 Candidates for Today ({latest_date_str}): {len(today_signals)}")
 
     try:
         for sig in today_signals:
             send_telegram_alert(sig)
             time.sleep(0.5)
     finally:
-        send_summary_telegram(today_signals, latest_date)
+        send_summary_telegram(today_signals, latest_date_str)
 
 
 if __name__ == "__main__":
