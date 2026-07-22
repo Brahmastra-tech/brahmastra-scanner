@@ -58,8 +58,8 @@ def calc_adx(df, period=14):
 def scan_symbol_exact(symbol, df_sym):
     """
     Exact scan logic mirroring BOBD_Fixedv3.py (abv.csv format):
-    - Uses Setup Candle i Date for CSV output
-    - Stores Trigger Candle i+1 Date for today's Telegram alerts
+    - Uses Setup Candle i Date
+    - Uses Raw Low5/High5 for SL
     """
     alerts = []
     if df_sym.empty or len(df_sym) < 20:
@@ -79,7 +79,7 @@ def scan_symbol_exact(symbol, df_sym):
     df['ADX'] = calc_adx(df, period=ADX_PERIOD)
 
     for i in range(len(df) - 1):
-        prev = df.iloc[i]      # Setup Candle i
+        prev = df.iloc[i]      # Setup Candle i (Date assigned from here)
         day1 = df.iloc[i + 1]  # Trigger Candle i+1
 
         try:
@@ -93,8 +93,8 @@ def scan_symbol_exact(symbol, df_sym):
             day1_ema = float(day1['EMA20'])
             day1_adx = float(day1['ADX']) if pd.notnull(day1['ADX']) else 0.0
             
+            # Attributed to SETUP CANDLE DATE (matches abv.csv)
             setup_date = pd.to_datetime(prev['Date']).strftime("%d-%m-%Y")
-            trigger_date = pd.to_datetime(day1['Date']).strftime("%d-%m-%Y")
         except Exception:
             continue
 
@@ -111,13 +111,12 @@ def scan_symbol_exact(symbol, df_sym):
                     continue
 
                 entry = round(high5, 2)
-                sl = round(low5, 2)
+                sl = round(low5, 2)  # Raw Low5 (matches abv.csv)
                 tgt = round(entry + (entry - sl) * TARGET_X, 2)
                 ema_dist = round(abs(day1_close - day1_ema) / day1_ema * 100, 2) if pd.notnull(day1_ema) and day1_ema > 0 else 0.0
 
                 alerts.append({
                     "Date": setup_date,
-                    "Trigger_Date": trigger_date,
                     "Symbol": symbol,
                     "Timeframe": "D",
                     "Type": "PRE_BREAKOUT",
@@ -139,13 +138,12 @@ def scan_symbol_exact(symbol, df_sym):
                     continue
 
                 entry = round(low5, 2)
-                sl = round(high5, 2)
+                sl = round(high5, 2)  # Raw High5 (matches abv.csv)
                 tgt = round(entry - (sl - entry) * TARGET_X, 2)
                 ema_dist = round(abs(day1_close - day1_ema) / day1_ema * 100, 2) if pd.notnull(day1_ema) and day1_ema > 0 else 0.0
 
                 alerts.append({
                     "Date": setup_date,
-                    "Trigger_Date": trigger_date,
                     "Symbol": symbol,
                     "Timeframe": "D",
                     "Type": "PRE_BREAKDOWN",
@@ -171,8 +169,7 @@ def send_telegram_alert(signal: dict):
 
     symbol = signal["Symbol"]
     sig_type = signal["Type"]
-    setup_date = signal["Date"]
-    trigger_date = signal["Trigger_Date"]
+    date_str = signal["Date"]
     entry = signal["Entry"]
     sl = signal["SL"]
     target = signal["Target"]
@@ -190,8 +187,7 @@ def send_telegram_alert(signal: dict):
         f"━━━━━━━━━━━━━━━━━━━━\n"
         f"📈 <b>Stock:</b> {symbol} (NSE F&O)\n"
         f"🎯 <b>Pattern:</b> {sig_type}\n"
-        f"⏱ <b>Timeframe:</b> Daily (1D) | <b>Breakout Date:</b> {trigger_date}\n"
-        f"🔍 <b>Setup Compression Date:</b> {setup_date}\n\n"
+        f"⏱ <b>Timeframe:</b> Daily (1D) | <b>Setup Date:</b> {date_str}\n\n"
         f"📊 <b>TRADE LEVELS</b>\n"
         f"• <b>Entry Price :</b> ₹{entry:.2f}\n"
         f"• <b>Stop Loss   :</b> ₹{sl:.2f}\n"
@@ -216,15 +212,15 @@ def send_telegram_alert(signal: dict):
 
 
 def send_summary_telegram(signal_count: int, date_str: str):
-    """Sends summary web dashboard link after scan completes (Always Sent)."""
+    """Sends summary web dashboard link after alerts."""
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
         return
 
     message = (
         f"🏁 <b>DAILY SCAN COMPLETE ({date_str})</b>\n"
         f"━━━━━━━━━━━━━━━━━━━━\n"
-        f"📊 <b>Breakout Signals Triggered Today:</b> {signal_count}\n\n"
-        f"🌐 <b>Interactive Web Dashboard & Full History:</b>\n"
+        f"📊 <b>Signals Found Today:</b> {signal_count}\n\n"
+        f"🌐 <b>Interactive Web Dashboard & History:</b>\n"
         f"👉 <a href='{DASHBOARD_URL}'>{DASHBOARD_URL}</a>\n"
         f"━━━━━━━━━━━━━━━━━━━━"
     )
@@ -271,17 +267,11 @@ def run_scanner():
             all_signals.extend(alerts)
 
     if not all_signals:
-        print("ℹ️ No signals matched conditions overall.")
-        send_summary_telegram(0, latest_date)
+        print("ℹ️ No signals matched conditions.")
         return
 
-    all_df = pd.DataFrame(all_signals)
-
-    # 3. Identify today's live signals (where Trigger_Date == latest_date)
-    today_signals = all_df[all_df['Trigger_Date'] == latest_date].to_dict('records')
-
-    # 4. Prepare export DataFrame (Matches exact abv.csv schema)
-    export_df = all_df.drop(columns=['Trigger_Date'])
+    # 3. Export to CSV matching exact abv.csv schema
+    export_df = pd.DataFrame(all_signals)
     export_df['Date_DT'] = pd.to_datetime(export_df['Date'], format="%d-%m-%Y")
     export_df = export_df.sort_values('Date_DT', ascending=False).drop(columns=['Date_DT'])
 
@@ -289,14 +279,16 @@ def run_scanner():
     export_df.to_csv(SIGNALS_CSV, index=False)
     print(f"✅ Saved {len(export_df)} signals matching abv.csv format to {SIGNALS_CSV}.")
 
-    # 5. Dispatch Telegram Alerts
+    # 4. Dispatch Telegram Alerts for Latest Market Date
+    today_signals = export_df[export_df['Date'] == latest_date].to_dict('records')
+    
     if today_signals:
         print(f"📢 Sending {len(today_signals)} alerts for today ({latest_date})...")
         for sig in today_signals:
             send_telegram_alert(sig)
-
-    # 6. Always send final summary with Dashboard Link
-    send_summary_telegram(len(today_signals), latest_date)
+        send_summary_telegram(len(today_signals), latest_date)
+    else:
+        print(f"ℹ️ No new signals triggered today ({latest_date}).")
 
 
 if __name__ == "__main__":
