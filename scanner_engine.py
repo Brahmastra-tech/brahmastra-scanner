@@ -57,7 +57,9 @@ def calc_adx(df, period=14):
 
 def scan_symbol_exact(symbol, df_sym):
     """
-    Exact scan logic mirroring BOBD_Fixedv3.py (abv.csv format)
+    Exact scan logic mirroring BOBD_Fixedv3.py (abv.csv format):
+    - Uses Setup Candle i Date for CSV output
+    - Stores Trigger Candle i+1 Date for today's Telegram alerts
     """
     alerts = []
     if df_sym.empty or len(df_sym) < 20:
@@ -96,7 +98,7 @@ def scan_symbol_exact(symbol, df_sym):
         except Exception:
             continue
 
-        # 1. Base Setup Condition
+        # 1. Base Setup Condition (Compression + Low Volume)
         if compression <= COMPRESSION_MAX and volume < avgvol:
 
             # ADX Filter
@@ -114,22 +116,21 @@ def scan_symbol_exact(symbol, df_sym):
                 ema_dist = round(abs(day1_close - day1_ema) / day1_ema * 100, 2) if pd.notnull(day1_ema) and day1_ema > 0 else 0.0
 
                 alerts.append({
-                    "date": setup_date,
-                    "trigger_date": trigger_date,
-                    "symbol": symbol,
-                    "timeframe": "D",
-                    "type": "PRE_BREAKOUT",
-                    "pattern": "PRE_BREAKOUT",
-                    "entry": entry,
-                    "sl": sl,
-                    "target": tgt,
-                    "close": round(day1_close, 2),
-                    "compression": round(compression, 4),
-                    "avgvol10": int(avgvol),
-                    "volume": int(day1['Volume']),
-                    "ema": round(day1_ema, 2) if pd.notnull(day1_ema) else 0.0,
-                    "ema_dist_pct": ema_dist,
-                    "adx": round(day1_adx, 2)
+                    "Date": setup_date,
+                    "Trigger_Date": trigger_date,
+                    "Symbol": symbol,
+                    "Timeframe": "D",
+                    "Type": "PRE_BREAKOUT",
+                    "Entry": entry,
+                    "SL": sl,
+                    "Target": tgt,
+                    "Close": round(day1_close, 2),
+                    "Compression": round(compression, 4),
+                    "AvgVol10": int(avgvol),
+                    "Volume": int(day1['Volume']),
+                    "EMA": round(day1_ema, 2) if pd.notnull(day1_ema) else 0.0,
+                    "EMA_Dist%": ema_dist,
+                    "ADX": round(day1_adx, 2)
                 })
 
             # PRE_BREAKDOWN
@@ -143,22 +144,21 @@ def scan_symbol_exact(symbol, df_sym):
                 ema_dist = round(abs(day1_close - day1_ema) / day1_ema * 100, 2) if pd.notnull(day1_ema) and day1_ema > 0 else 0.0
 
                 alerts.append({
-                    "date": setup_date,
-                    "trigger_date": trigger_date,
-                    "symbol": symbol,
-                    "timeframe": "D",
-                    "type": "PRE_BREAKDOWN",
-                    "pattern": "PRE_BREAKDOWN",
-                    "entry": entry,
-                    "sl": sl,
-                    "target": tgt,
-                    "close": round(day1_close, 2),
-                    "compression": round(compression, 4),
-                    "avgvol10": int(avgvol),
-                    "volume": int(day1['Volume']),
-                    "ema": round(day1_ema, 2) if pd.notnull(day1_ema) else 0.0,
-                    "ema_dist_pct": ema_dist,
-                    "adx": round(day1_adx, 2)
+                    "Date": setup_date,
+                    "Trigger_Date": trigger_date,
+                    "Symbol": symbol,
+                    "Timeframe": "D",
+                    "Type": "PRE_BREAKDOWN",
+                    "Entry": entry,
+                    "SL": sl,
+                    "Target": tgt,
+                    "Close": round(day1_close, 2),
+                    "Compression": round(compression, 4),
+                    "AvgVol10": int(avgvol),
+                    "Volume": int(day1['Volume']),
+                    "EMA": round(day1_ema, 2) if pd.notnull(day1_ema) else 0.0,
+                    "EMA_Dist%": ema_dist,
+                    "ADX": round(day1_adx, 2)
                 })
 
     return alerts
@@ -169,19 +169,19 @@ def send_telegram_alert(signal: dict):
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
         return
 
-    symbol = signal["symbol"]
-    sig_type = signal["type"]
-    setup_date = signal["date"]
-    trigger_date = signal["trigger_date"]
-    entry = signal["entry"]
-    sl = signal["sl"]
-    target = signal["target"]
-    close = signal["close"]
-    avgvol = signal["avgvol10"]
-    volume = signal["volume"]
+    symbol = signal["Symbol"]
+    sig_type = signal["Type"]
+    setup_date = signal["Date"]
+    trigger_date = signal["Trigger_Date"]
+    entry = signal["Entry"]
+    sl = signal["SL"]
+    target = signal["Target"]
+    close = signal["Close"]
+    avgvol = signal["AvgVol10"]
+    volume = signal["Volume"]
     vol_ratio = round(volume / avgvol, 2) if avgvol > 0 else 1.0
-    ema = signal["ema"]
-    adx = signal["adx"]
+    ema = signal["EMA"]
+    adx = signal["ADX"]
 
     emoji = "🚀" if sig_type == "PRE_BREAKOUT" else "📉"
     
@@ -216,7 +216,7 @@ def send_telegram_alert(signal: dict):
 
 
 def send_summary_telegram(signal_count: int, date_str: str):
-    """Sends summary web dashboard link after scan completes."""
+    """Sends summary web dashboard link after scan completes (Always Sent)."""
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
         return
 
@@ -277,17 +277,17 @@ def run_scanner():
 
     all_df = pd.DataFrame(all_signals)
 
-    # 3. Identify today's live signals (where trigger_date == latest_date)
-    today_signals = all_df[all_df['trigger_date'] == latest_date].to_dict('records')
+    # 3. Identify today's live signals (where Trigger_Date == latest_date)
+    today_signals = all_df[all_df['Trigger_Date'] == latest_date].to_dict('records')
 
-    # 4. Prepare export DataFrame for web dashboard
-    export_df = all_df.drop(columns=['trigger_date'])
-    export_df['Date_DT'] = pd.to_datetime(export_df['date'], format="%d-%m-%Y")
+    # 4. Prepare export DataFrame (Matches exact abv.csv schema)
+    export_df = all_df.drop(columns=['Trigger_Date'])
+    export_df['Date_DT'] = pd.to_datetime(export_df['Date'], format="%d-%m-%Y")
     export_df = export_df.sort_values('Date_DT', ascending=False).drop(columns=['Date_DT'])
 
     os.makedirs("data", exist_ok=True)
     export_df.to_csv(SIGNALS_CSV, index=False)
-    print(f"✅ Saved {len(export_df)} signals with web-compatible headers to {SIGNALS_CSV}.")
+    print(f"✅ Saved {len(export_df)} signals matching abv.csv format to {SIGNALS_CSV}.")
 
     # 5. Dispatch Telegram Alerts
     if today_signals:
@@ -295,7 +295,7 @@ def run_scanner():
         for sig in today_signals:
             send_telegram_alert(sig)
 
-    # 6. Send final summary with Dashboard Link
+    # 6. Always send final summary with Dashboard Link
     send_summary_telegram(len(today_signals), latest_date)
 
 
