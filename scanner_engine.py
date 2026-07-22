@@ -150,16 +150,16 @@ def send_telegram_alert(signal: dict):
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
         return
 
-    symbol = signal["Symbol"]
-    sig_type = signal["Type"]
-    date_str = signal["Date"]
-    entry = signal["Entry"]
-    sl = signal["SL"]
-    target = signal["Target"]
-    close = signal["Close"]
-    vol_ratio = signal["VolRatio"]
-    ema = signal["EMA"]
-    adx = signal["ADX"]
+    symbol = signal["symbol"]
+    sig_type = signal["type"]
+    date_str = signal["date"]
+    entry = signal["entry"]
+    sl = signal["sl"]
+    target = signal["target"]
+    close = signal["close"]
+    vol_ratio = signal["vol_ratio"]
+    ema = signal["ema"]
+    adx = signal["adx"]
 
     emoji = "🚀" if sig_type == "PRE_BREAKOUT" else "📉"
     
@@ -263,7 +263,7 @@ def run_scanner():
     first_instance = df_signals[df_signals['Days_Diff'].isna() | (df_signals['Days_Diff'] > 1)].copy()
     first_instance = first_instance.sort_values('Date_DT', ascending=False)
 
-    # Save to CSV
+    # Save to CSV with normalized lowercase column names
     export_df = first_instance[['Date', 'Symbol', 'Type', 'Entry', 'SL', 'Target', 'Close', 'EMA', 'ADX', 'Compression', 'VolRatio']]
     export_df.columns = ['date', 'symbol', 'type', 'entry', 'sl', 'target', 'close', 'ema', 'adx', 'compression', 'vol_ratio']
 
