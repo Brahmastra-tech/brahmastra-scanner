@@ -6,19 +6,17 @@ import requests
 from datetime import datetime
 
 # ==========================================
-# CONFIGURATION (HIGH-CONVICTION FILTERS)
+# CONFIGURATION (100% BOBD GUI PARITY)
 # ==========================================
 DB_PATH = "data/candles.duckdb"
 SIGNALS_CSV = "data/signals.csv"
 
-COMPRESSION_MAX = 0.05       # 5% Max Compression Range
-PROXIMITY_MAX_PCT = 0.015    # Must be within 1.5% of Breakout Level (High5 / Low5)
-MIN_VOL_RATIO = 0.80        # Volume must be at least 80% of 10-day Avg Volume
-TARGET_X = 3.0              # 3x Risk Target
+COMPRESSION_MAX = 0.05   # 5% Max Compression Range
+TARGET_X = 3.0          # Target = Entry + (Entry - SL) * 3.0
 
 EMA_PERIOD = 20
 ADX_PERIOD = 14
-MIN_ADX = 25.0              # Strict Trend Strength Filter (ADX >= 25)
+MIN_ADX = 20.0          # Aligned with BOBD logic
 APPLY_EMA_FILTER = True
 APPLY_ADX_FILTER = True
 
@@ -59,8 +57,8 @@ def calc_adx(df, period=14):
 
 def scan_symbol_exact(symbol, df_sym):
     """
-    HIGH-CONVICTION PRE-BREAKOUT WATCHLIST:
-    Filters candidates by Proximity to Trigger (<=1.5%), ADX (>=25), and Volume Dry-Up.
+    PRE-BREAKOUT WATCHLIST ENGINE:
+    Identifies setup candles where compression <= 5% and volume < 10-day avg.
     """
     alerts = []
     if df_sym.empty or len(df_sym) < 20:
@@ -95,23 +93,16 @@ def scan_symbol_exact(symbol, df_sym):
         except Exception:
             continue
 
-        # 1. Base Pre-Breakout Setup Condition
+        # Base Pre-Breakout Setup Condition
         if compression <= COMPRESSION_MAX and volume < avgvol:
 
-            # 2. Strict ADX Filter
+            # ADX Filter (>= 20.0)
             if APPLY_ADX_FILTER and adx < MIN_ADX:
                 continue
 
-            vol_ratio = volume / avgvol if avgvol > 0 else 0.0
-
-            # PRE_BREAKOUT WATCHLIST
+            # PRE_BREAKOUT WATCHLIST (Price >= 20 EMA)
             if close >= ema:
                 if APPLY_EMA_FILTER and (pd.isna(ema) or close < ema):
-                    continue
-
-                # Check Proximity: Close must be within 1.5% of High5
-                dist_to_trigger = (high5 - close) / close
-                if dist_to_trigger > PROXIMITY_MAX_PCT:
                     continue
 
                 entry = round(high5, 2)
@@ -137,14 +128,9 @@ def scan_symbol_exact(symbol, df_sym):
                     "adx": round(adx, 2)
                 })
 
-            # PRE_BREAKDOWN WATCHLIST
+            # PRE_BREAKDOWN WATCHLIST (Price < 20 EMA)
             elif close < ema:
                 if APPLY_EMA_FILTER and (pd.isna(ema) or close > ema):
-                    continue
-
-                # Check Proximity: Close must be within 1.5% of Low5
-                dist_to_trigger = (close - low5) / close
-                if dist_to_trigger > PROXIMITY_MAX_PCT:
                     continue
 
                 entry = round(low5, 2)
@@ -238,9 +224,9 @@ def send_summary_telegram(signal_count: int, date_str: str):
         return
 
     if signal_count > 0:
-        status_text = f"📊 <b>High-Conviction Watchlist Candidates Found Today:</b> {signal_count}"
+        status_text = f"📊 <b>Pre-Breakout Candidates Found Today:</b> {signal_count}"
     else:
-        status_text = f"ℹ️ <b>No High-Conviction Pre-Breakout Stocks Found Today (0 Stocks)</b>"
+        status_text = f"ℹ️ <b>No Qualified Pre-Breakout Stocks Found Today (0 Stocks)</b>"
 
     message = (
         f"🏁 <b>DAILY SCAN COMPLETE ({date_str})</b>\n"
@@ -310,24 +296,30 @@ def run_scanner():
         send_summary_telegram(0, latest_date)
         return
 
+    # 3. Deduplicate: Keep only the earliest occurrence of each Symbol + Pattern
     all_df = pd.DataFrame(all_signals)
+    all_df["Date_DT"] = pd.to_datetime(all_df["date"], format="%d-%m-%Y")
 
-    # 3. Save full history archive to CSV for Web Dashboard
-    all_df['Date_DT'] = pd.to_datetime(all_df['date'], format="%d-%m-%Y")
-    export_df = all_df.sort_values('Date_DT', ascending=False).drop(columns=['Date_DT'])
+    all_df = (
+        all_df.sort_values("Date_DT")
+              .drop_duplicates(subset=["symbol", "pattern"], keep="first")
+              .sort_values("Date_DT", ascending=False)
+    )
+
+    export_df = all_df.drop(columns=["Date_DT"])
     export_df.to_csv(SIGNALS_CSV, index=False)
-    print(f"✅ Saved {len(export_df)} total historical setups to {SIGNALS_CSV}.")
+    print(f"✅ Saved {len(export_df)} unique first-instance signals to {SIGNALS_CSV}.")
 
     # 4. Identify today's candidates
-    today_signals = all_df[all_df['date'] == latest_date].to_dict('records')
-    print(f"📊 High-Conviction Candidates for Today ({latest_date}): {len(today_signals)}")
+    today_signals = export_df[export_df['date'] == latest_date].to_dict('records')
+    print(f"📊 Candidates for Today ({latest_date}): {len(today_signals)}")
 
     # 5. Dispatch Telegram Alerts
     if today_signals:
         for sig in today_signals:
             send_telegram_alert(sig)
     else:
-        print(f"ℹ️ 0 candidates for today ({latest_date}).")
+        print(f"ℹ️ 0 first-instance candidates for today ({latest_date}).")
 
     # 6. Always send completion summary
     send_summary_telegram(len(today_signals), latest_date)
