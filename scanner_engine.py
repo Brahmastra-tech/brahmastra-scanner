@@ -57,8 +57,8 @@ def calc_adx(df, period=14):
 
 def scan_symbol_exact(symbol, df_sym):
     """
-    Exact scan logic mirroring BOBD_Fixedv3.py logic:
-    - Primary Date is the Trigger Date (Candle i+1 Breakout)
+    Exact scan logic:
+    Primary signal date is Trigger Date (Candle i+1 Breakout)
     """
     alerts = []
     if df_sym.empty or len(df_sym) < 20:
@@ -104,7 +104,7 @@ def scan_symbol_exact(symbol, df_sym):
             if APPLY_ADX_FILTER and day1_adx < MIN_ADX:
                 continue
 
-            # PRE_BREAKOUT
+            # PRE_BREAKOUT Trigger
             if day1_close > high5:
                 if APPLY_EMA_FILTER and (pd.isna(day1_ema) or day1_close < day1_ema):
                     continue
@@ -115,12 +115,12 @@ def scan_symbol_exact(symbol, df_sym):
                 ema_dist = round(abs(day1_close - day1_ema) / day1_ema * 100, 2) if pd.notnull(day1_ema) and day1_ema > 0 else 0.0
 
                 alerts.append({
-                    "date": trigger_date,      # Breakout Date
-                    "setup_date": setup_date,  # Compression Date
+                    "date": trigger_date,      # Set to Trigger Date (21-07-2026)
+                    "setup_date": setup_date,  # Setup Compression Date (20-07-2026)
                     "symbol": symbol,
                     "timeframe": "D",
                     "type": "PRE_BREAKOUT",
-                    "pattern": "PRE_BREAKOUT", # Required by index.html
+                    "pattern": "PRE_BREAKOUT",
                     "entry": entry,
                     "sl": sl,
                     "target": tgt,
@@ -133,7 +133,7 @@ def scan_symbol_exact(symbol, df_sym):
                     "adx": round(day1_adx, 2)
                 })
 
-            # PRE_BREAKDOWN
+            # PRE_BREAKDOWN Trigger
             elif day1_close < low5:
                 if APPLY_EMA_FILTER and (pd.isna(day1_ema) or day1_close > day1_ema):
                     continue
@@ -144,12 +144,12 @@ def scan_symbol_exact(symbol, df_sym):
                 ema_dist = round(abs(day1_close - day1_ema) / day1_ema * 100, 2) if pd.notnull(day1_ema) and day1_ema > 0 else 0.0
 
                 alerts.append({
-                    "date": trigger_date,      # Breakdown Date
-                    "setup_date": setup_date,  # Compression Date
+                    "date": trigger_date,      # Set to Trigger Date
+                    "setup_date": setup_date,  # Setup Compression Date
                     "symbol": symbol,
                     "timeframe": "D",
                     "type": "PRE_BREAKDOWN",
-                    "pattern": "PRE_BREAKDOWN", # Required by index.html
+                    "pattern": "PRE_BREAKDOWN",
                     "entry": entry,
                     "sl": sl,
                     "target": tgt,
@@ -191,7 +191,7 @@ def send_telegram_alert(signal: dict):
         f"━━━━━━━━━━━━━━━━━━━━\n"
         f"📈 <b>Stock:</b> {symbol} (NSE F&O)\n"
         f"🎯 <b>Pattern:</b> {sig_type}\n"
-        f"⏱ <b>Timeframe:</b> Daily (1D) | <b>Breakout Date:</b> {trigger_date}\n"
+        f"⏱ <b>Timeframe:</b> Daily (1D) | <b>Signal Date:</b> {trigger_date}\n"
         f"🔍 <b>Setup Compression Date:</b> {setup_date}\n\n"
         f"📊 <b>TRADE LEVELS</b>\n"
         f"• <b>Entry Price :</b> ₹{entry:.2f}\n"
@@ -217,14 +217,19 @@ def send_telegram_alert(signal: dict):
 
 
 def send_summary_telegram(signal_count: int, date_str: str):
-    """Sends summary web dashboard link after scan completes."""
+    """Sends summary message to Telegram (always sent, even if count is 0)."""
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
         return
+
+    if signal_count > 0:
+        count_text = f"📊 <b>Breakout Signals Triggered Today:</b> {signal_count}"
+    else:
+        count_text = f"ℹ️ <b>No High-Conviction Breakout Signals Triggered Today (0 Stocks)</b>"
 
     message = (
         f"🏁 <b>DAILY SCAN COMPLETE ({date_str})</b>\n"
         f"━━━━━━━━━━━━━━━━━━━━\n"
-        f"📊 <b>Breakout Signals Triggered Today:</b> {signal_count}\n\n"
+        f"{count_text}\n\n"
         f"🌐 <b>Interactive Web Dashboard & Full History:</b>\n"
         f"👉 <a href='{DASHBOARD_URL}'>{DASHBOARD_URL}</a>\n"
         f"━━━━━━━━━━━━━━━━━━━━"
@@ -278,7 +283,7 @@ def run_scanner():
 
     all_df = pd.DataFrame(all_signals)
 
-    # 3. Identify today's live signals (where date == latest_date)
+    # 3. Identify today's live signals (where breakout date == latest_date)
     today_signals = all_df[all_df['date'] == latest_date].to_dict('records')
 
     # 4. Prepare export DataFrame for web dashboard
@@ -289,13 +294,15 @@ def run_scanner():
     export_df.to_csv(SIGNALS_CSV, index=False)
     print(f"✅ Saved {len(export_df)} signals with web dashboard compatible headers to {SIGNALS_CSV}.")
 
-    # 5. Dispatch Telegram Alerts
+    # 5. Dispatch individual Telegram Alerts if any triggered
     if today_signals:
         print(f"📢 Sending {len(today_signals)} alerts for today ({latest_date})...")
         for sig in today_signals:
             send_telegram_alert(sig)
+    else:
+        print(f"ℹ️ 0 signals triggered today ({latest_date}).")
 
-    # 6. Send final summary with Dashboard Link
+    # 6. Always send final summary message (including 0 stock days)
     send_summary_telegram(len(today_signals), latest_date)
 
 
