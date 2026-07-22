@@ -26,27 +26,30 @@ def scan_symbol_exact(symbol, df_sym):
 
     df = df_sym.copy().sort_values("Date").reset_index(drop=True)
 
-    # -------------------------------------------------------------
-    # 1. STRICT DELIVERY DATA VERIFICATION
-    # -------------------------------------------------------------
+    # 1. Flexible Column Mapping for Delivery Data
     deliv_qty_col = None
-    for col in ['delivery_qty', 'delivery_volume', 'DeliveryQty', 'DeliveryVolume']:
+    for col in ['delivery_qty', 'delivery_volume', 'DeliveryQty', 'DeliveryVolume', 'deliv_qty', 'sec_delivery_qty']:
         if col in df.columns:
             deliv_qty_col = col
             break
 
     deliv_pct_col = None
-    for col in ['delivery_pct', 'DeliveryPct', 'deliv_pct']:
+    for col in ['delivery_pct', 'DeliveryPct', 'deliv_pct', 'sec_delivery_pct']:
         if col in df.columns:
             deliv_pct_col = col
             break
 
-    # Strictly reject scanning if real delivery columns are missing
-    if deliv_qty_col is None or deliv_pct_col is None:
+    # If delivery qty column doesn't exist, we cannot run delivery scan for this symbol
+    if deliv_qty_col is None:
         return alerts
 
     df['DeliveryQty'] = pd.to_numeric(df[deliv_qty_col], errors='coerce')
-    df['DeliveryPct'] = pd.to_numeric(df[deliv_pct_col], errors='coerce')
+
+    # If delivery pct is missing, derive it from DeliveryQty / Volume
+    if deliv_pct_col is not None:
+        df['DeliveryPct'] = pd.to_numeric(df[deliv_pct_col], errors='coerce')
+    else:
+        df['DeliveryPct'] = (df['DeliveryQty'] / df['Volume']) * 100.0
 
     df['Prev_DelivQty'] = df['DeliveryQty'].shift(1)
 
@@ -61,7 +64,7 @@ def scan_symbol_exact(symbol, df_sym):
         close_p = float(row["Close"])
         volume = float(row["Volume"])
 
-        # Skip rows with missing delivery data
+        # Skip rows with missing metrics
         if pd.isna(row["DeliveryQty"]) or pd.isna(row["DeliveryPct"]) or pd.isna(row["Prev_DelivQty"]):
             continue
 
@@ -69,24 +72,25 @@ def scan_symbol_exact(symbol, df_sym):
         prev_deliv_qty = float(row["Prev_DelivQty"])
         deliv_pct = float(row["DeliveryPct"])
 
-        # Reject if previous delivery quantity was zero or invalid
+        # Reject if previous delivery quantity was invalid
         if prev_deliv_qty <= 0:
             continue
 
+        deliv_spike_ratio = deliv_qty / prev_deliv_qty
+
         # -------------------------------------------------------------
-        # EXACT 6 DELIVERY ACCUMULATION RULES
+        # ACCUMULATION SCANNER CONDITIONS
         # -------------------------------------------------------------
-        c1_vol = volume > 500000                                  # [0] Volume > 500000
-        c2_deliv_spike = deliv_qty > (prev_deliv_qty * 3.0)      # [0] Delivery Vol > Prev Delivery Vol * 3
-        c3_deliv_pct = deliv_pct > 55.0                           # [0] Delivery % > 55
-        c4_close_min = close_p >= (open_p * 0.99)                # [0] Close >= Open * 0.99
-        c5_close_max = close_p <= (open_p * 1.02)                # [0] Close <= Open * 1.02
-        c6_range_squeeze = (high_p - low_p) <= (close_p * 0.03)   # [0] High - Low <= Close * 0.03
+        c1_vol = volume >= 300000                                 # Liquidity Floor
+        c2_deliv_spike = deliv_spike_ratio >= 2.0                 # 2.0x Delivery Spike vs Yday
+        c3_deliv_pct = deliv_pct >= 50.0                          # Delivery % >= 50%
+        c4_close_min = close_p >= (open_p * 0.985)               # Candle Open-Close Range
+        c5_close_max = close_p <= (open_p * 1.025)               
+        c6_range_squeeze = (high_p - low_p) <= (close_p * 0.035)  # Range Squeeze (High - Low <= 3.5%)
 
         if not (c1_vol and c2_deliv_spike and c3_deliv_pct and c4_close_min and c5_close_max and c6_range_squeeze):
             continue
 
-        # FIX 1: Include row["Date"] in the key so new dates aren't skipped!
         date_str = pd.to_datetime(row["Date"]).strftime("%d-%m-%Y")
         key = (symbol, date_str, "DELIVERY_ACCUMULATION")
 
@@ -96,7 +100,6 @@ def scan_symbol_exact(symbol, df_sym):
             entry = round(high_p, 2)
             sl = round(low_p, 2)
             target = round(entry + (entry - sl) * TARGET_X, 2)
-            spike_ratio = round(deliv_qty / prev_deliv_qty, 2)
 
             alerts.append({
                 "Date": date_str,
@@ -111,7 +114,7 @@ def scan_symbol_exact(symbol, df_sym):
                 "Volume": int(volume),
                 "DeliveryQty": int(deliv_qty),
                 "DeliveryPct": round(deliv_pct, 2),
-                "DelivSpikeRatio": spike_ratio
+                "DelivSpikeRatio": round(deliv_spike_ratio, 2)
             })
 
     return alerts
@@ -139,7 +142,7 @@ def send_telegram_alert(signal: dict):
         f"{emoji} <b>BRAHMASTRA ACCUMULATION WATCHLIST</b>\n"
         f"━━━━━━━━━━━━━━━━━━━━\n"
         f"📈 <b>Stock:</b> {symbol} (NSE F&O)\n"
-        f"🎯 <b>Pattern:</b> 3x Delivery Accumulation Squeeze\n"
+        f"🎯 <b>Pattern:</b> Delivery Accumulation Squeeze\n"
         f"⏱ <b>Setup Date:</b> {setup_date}\n\n"
         f"📊 <b>ACTIONABLE TRIGGER LEVELS</b>\n"
         f"• <b>Trigger Buy Above   :</b> ₹{entry:.2f}\n"
@@ -242,7 +245,7 @@ def run_scanner():
     os.makedirs("data", exist_ok=True)
 
     if not all_signals:
-        print("ℹ️ No signals matched strict conditions overall.")
+        print("ℹ️ No signals matched conditions overall.")
         pd.DataFrame(columns=['Date', 'Symbol', 'Timeframe', 'Type', 'Pattern', 'Entry', 'SL', 'Target', 'Close', 'Volume', 'DeliveryQty', 'DeliveryPct', 'DelivSpikeRatio']).to_csv(SIGNALS_CSV, index=False)
         send_summary_telegram([], latest_date_str)
         return
@@ -256,7 +259,7 @@ def run_scanner():
     export_df.to_csv(SIGNALS_CSV, index=False)
     print(f"✅ Saved {len(export_df)} total historical signals to {SIGNALS_CSV}.")
 
-    # Extract today's signals accurately using matching formatted strings
+    # Extract today's signals
     today_signals = export_df[export_df[date_col] == latest_date_str].to_dict('records')
     print(f"📊 Candidates for Today ({latest_date_str}): {len(today_signals)}")
 
