@@ -27,7 +27,7 @@
         body {
             background-color: var(--bg-dark);
             color: var(--text-main);
-            padding: 2rem;
+            padding: 1.5rem;
             min-height: 100vh;
         }
 
@@ -35,9 +35,11 @@
             display: flex;
             justify-content: space-between;
             align-items: center;
-            margin-bottom: 2rem;
+            margin-bottom: 1.5rem;
             padding-bottom: 1rem;
             border-bottom: 1px solid var(--border-color);
+            flex-wrap: wrap;
+            gap: 1rem;
         }
 
         .logo {
@@ -47,80 +49,83 @@
         }
 
         .logo h1 {
-            font-size: 1.5rem;
+            font-size: 1.35rem;
             font-weight: 700;
             letter-spacing: -0.025em;
         }
 
         .logo p {
-            font-size: 0.875rem;
+            font-size: 0.8rem;
             color: var(--text-muted);
         }
 
         .header-actions {
             display: flex;
             align-items: center;
-            gap: 1rem;
+            gap: 0.75rem;
+            flex-wrap: wrap;
         }
 
         .stats-badge {
             background: rgba(59, 130, 246, 0.1);
             color: var(--accent-blue);
-            padding: 0.5rem 1rem;
+            padding: 0.4rem 0.85rem;
             border-radius: 9999px;
-            font-size: 0.875rem;
+            font-size: 0.8rem;
             font-weight: 600;
             border: 1px solid rgba(59, 130, 246, 0.2);
+            white-space: nowrap;
         }
 
         .btn-export {
-            background-color: rgba(59, 130, 246, 0.15);
-            color: var(--text-main);
-            padding: 0.5rem 1rem;
+            background-color: var(--accent-blue);
+            color: #ffffff;
+            padding: 0.45rem 0.9rem;
             border-radius: 0.5rem;
-            font-size: 0.875rem;
+            font-size: 0.8rem;
             font-weight: 600;
-            border: 1px solid rgba(59, 130, 246, 0.3);
+            border: none;
             cursor: pointer;
-            display: flex;
+            display: inline-flex;
             align-items: center;
-            gap: 0.5rem;
-            transition: all 0.2s;
+            gap: 0.4rem;
+            transition: opacity 0.2s;
+            white-space: nowrap;
         }
 
         .btn-export:hover {
-            background-color: var(--accent-blue);
-            color: #ffffff;
+            opacity: 0.9;
         }
 
         .controls {
             display: flex;
-            gap: 1rem;
-            margin-bottom: 1.5rem;
+            gap: 0.75rem;
+            margin-bottom: 1.25rem;
             flex-wrap: wrap;
+            align-items: center;
         }
 
         .search-box, .filter-select, .date-picker {
             background-color: var(--card-bg);
             border: 1px solid var(--border-color);
             color: var(--text-main);
-            padding: 0.75rem 1rem;
+            padding: 0.6rem 0.85rem;
             border-radius: 0.5rem;
             outline: none;
-            font-size: 0.875rem;
+            font-size: 0.825rem;
         }
 
         .search-box {
-            flex-grow: 1;
-            min-width: 250px;
+            flex: 1 1 200px;
+            min-width: 180px;
         }
 
         .date-picker-wrapper {
             display: flex;
             align-items: center;
-            gap: 0.5rem;
+            gap: 0.4rem;
             color: var(--text-muted);
-            font-size: 0.875rem;
+            font-size: 0.825rem;
         }
 
         .table-container {
@@ -135,22 +140,23 @@
             width: 100%;
             border-collapse: collapse;
             text-align: left;
-            font-size: 0.875rem;
+            font-size: 0.85rem;
+            min-width: 800px;
         }
 
         th {
             background-color: rgba(31, 41, 55, 0.5);
             color: var(--text-muted);
             font-weight: 600;
-            padding: 1rem;
+            padding: 0.85rem 1rem;
             text-transform: uppercase;
-            font-size: 0.75rem;
+            font-size: 0.725rem;
             letter-spacing: 0.05em;
             border-bottom: 1px solid var(--border-color);
         }
 
         td {
-            padding: 1rem;
+            padding: 0.85rem 1rem;
             border-bottom: 1px solid var(--border-color);
             vertical-align: middle;
         }
@@ -165,9 +171,9 @@
 
         .badge {
             display: inline-block;
-            padding: 0.25rem 0.5rem;
+            padding: 0.2rem 0.45rem;
             border-radius: 0.375rem;
-            font-size: 0.75rem;
+            font-size: 0.725rem;
             font-weight: 600;
         }
 
@@ -189,10 +195,10 @@
             gap: 0.25rem;
             background-color: rgba(59, 130, 246, 0.1);
             color: var(--accent-blue);
-            padding: 0.375rem 0.75rem;
+            padding: 0.35rem 0.65rem;
             border-radius: 0.375rem;
             text-decoration: none;
-            font-size: 0.75rem;
+            font-size: 0.725rem;
             font-weight: 600;
             border: 1px solid rgba(59, 130, 246, 0.2);
             transition: all 0.2s;
@@ -214,7 +220,7 @@
 
     <div class="header">
         <div class="logo">
-            <span style="font-size: 1.75rem;">🚀</span>
+            <span style="font-size: 1.5rem;">🚀</span>
             <div>
                 <h1>BRAHMASTRA SCANNER</h1>
                 <p>NSE F&O Pre-Breakout Watchlist & Signal Terminal</p>
@@ -340,7 +346,6 @@
             });
         }
 
-        // Listeners for Search, Date, and Pattern Filters
         document.getElementById('searchInput').addEventListener('input', filterData);
         document.getElementById('dateFilter').addEventListener('change', filterData);
         document.getElementById('patternFilter').addEventListener('change', filterData);
@@ -348,12 +353,12 @@
         function filterData() {
             const searchVal = document.getElementById('searchInput').value.toUpperCase();
             const patternVal = document.getElementById('patternFilter').value;
-            const dateVal = document.getElementById('dateFilter').value; // Formats as YYYY-MM-DD
+            const dateVal = document.getElementById('dateFilter').value;
 
             let formattedSearchDate = '';
             if (dateVal) {
-                const parts = dateVal.split('-'); // [YYYY, MM, DD]
-                formattedSearchDate = `${parts[2]}-${parts[1]}-${parts[0]}`; // Convert to DD-MM-YYYY
+                const parts = dateVal.split('-');
+                formattedSearchDate = `${parts[2]}-${parts[1]}-${parts[0]}`;
             }
 
             filteredData = allData.filter(row => {
@@ -371,7 +376,6 @@
             renderTable(filteredData);
         }
 
-        // Export Filtered CSV Handler
         document.getElementById('exportBtn').addEventListener('click', () => {
             if (!filteredData || filteredData.length === 0) {
                 alert('No data available to export.');
