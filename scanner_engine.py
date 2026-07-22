@@ -341,7 +341,7 @@ def send_telegram_alert(signal: dict):
 
 
 def send_summary_telegram(signals_today: list, date_str: str):
-    """Sends scan summary to Telegram with Long & Short breakdowns."""
+    """Sends scan execution summary to Telegram with Long & Short breakdowns."""
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
         print("⚠️ Telegram credentials missing. Skipping summary dispatch.")
         return
@@ -357,7 +357,7 @@ def send_summary_telegram(signals_today: list, date_str: str):
         f"🚀 <b>Pre-Breakout (Long | RSI > 52)   :</b> {len(breakouts)}\n"
         f"📉 <b>Pre-Breakdown (Short | RSI < 48)  :</b> {len(breakdowns)}\n\n"
         f"🌐 <b>Interactive Web Dashboard & Full History:</b>\n"
-        f"👉 <a href='{DASHBOARD_URL}'>{DASHBOARD_URL}</a>\n"
+        f"{DASHBOARD_URL}\n"
         f"━━━━━━━━━━━━━━━━━━━━"
     )
 
@@ -371,7 +371,7 @@ def send_summary_telegram(signals_today: list, date_str: str):
     try:
         res = requests.post(url, json=payload, timeout=10)
         if res.status_code == 200:
-            print(f"✅ Telegram summary sent for {date_str}")
+            print(f"✅ Telegram summary sent successfully for {date_str}")
         else:
             print(f"❌ Telegram Summary API Error ({res.status_code}): {res.text}")
     except Exception as e:
@@ -403,7 +403,7 @@ def run_scanner():
     symbols = df_raw['Symbol'].unique()
     all_signals = []
 
-    # 1. Collect all signals across available historical candles
+    # 1. Gather all historical signals
     for sym in symbols:
         df_sym = df_raw[df_raw['Symbol'] == sym]
         alerts = scan_symbol_exact(sym, df_sym)
@@ -418,7 +418,7 @@ def run_scanner():
         send_summary_telegram([], latest_date)
         return
 
-    # 2. Export full historical backtest dataset to CSV
+    # 2. Export full history dataset to CSV
     all_df = pd.DataFrame(all_signals)
     date_col = "Date" if "Date" in all_df.columns else "date"
     all_df["Date_DT"] = pd.to_datetime(all_df[date_col], format="%d-%m-%Y")
@@ -431,11 +431,11 @@ def run_scanner():
     today_signals = export_df[export_df[date_col] == latest_date].to_dict('records')
     print(f"📊 Candidates for Today ({latest_date}): {len(today_signals)}")
 
-    # 4. Dispatch individual stock alerts to Telegram
+    # 4. Dispatch individual alerts
     for sig in today_signals:
         send_telegram_alert(sig)
 
-    # 5. Dispatch summary message to Telegram
+    # 5. Dispatch daily summary card with dashboard link
     send_summary_telegram(today_signals, latest_date)
 
 
