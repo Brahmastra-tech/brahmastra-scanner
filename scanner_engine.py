@@ -57,9 +57,9 @@ def calc_adx(df, period=14):
 
 def scan_symbol_exact(symbol, df_sym):
     """
-    PRE-BREAKOUT WATCHLIST ENGINE:
-    Identifies stocks ending today in tight compression (<= 5%) and volume dry-up,
-    providing tomorrow's actionable trigger levels BEFORE the breakout occurs.
+    PRE-BREAKOUT ENGINE:
+    Identifies setup candles where compression <= 5% and volume < 10-day avg,
+    providing actionable trigger prices BEFORE breakout occurs.
     """
     alerts = []
     if df_sym.empty or len(df_sym) < 20:
@@ -78,7 +78,7 @@ def scan_symbol_exact(symbol, df_sym):
     df['EMA20'] = df['Close'].ewm(span=EMA_PERIOD, adjust=False).mean()
     df['ADX'] = calc_adx(df, period=ADX_PERIOD)
 
-    # Scan history candles so the full dashboard archive is populated
+    # Iterate through candle history to build full historical database + today
     for i in range(len(df)):
         candle = df.iloc[i]
 
@@ -102,7 +102,7 @@ def scan_symbol_exact(symbol, df_sym):
             if APPLY_ADX_FILTER and adx < MIN_ADX:
                 continue
 
-            # PRE_BREAKOUT WATCHLIST (Price above/near 20 EMA)
+            # PRE_BREAKOUT WATCHLIST (Price >= 20 EMA)
             if close >= ema:
                 if APPLY_EMA_FILTER and (pd.isna(ema) or close < ema):
                     continue
@@ -130,7 +130,7 @@ def scan_symbol_exact(symbol, df_sym):
                     "adx": round(adx, 2)
                 })
 
-            # PRE_BREAKDOWN WATCHLIST (Price below 20 EMA)
+            # PRE_BREAKDOWN WATCHLIST (Price < 20 EMA)
             elif close < ema:
                 if APPLY_EMA_FILTER and (pd.isna(ema) or close > ema):
                     continue
@@ -162,7 +162,7 @@ def scan_symbol_exact(symbol, df_sym):
 
 
 def send_telegram_alert(signal: dict):
-    """Sends individual pre-breakout alert to Telegram with actionable trigger levels."""
+    """Sends individual alert to Telegram with explicit NSE Chart URL."""
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
         return
 
@@ -212,7 +212,7 @@ def send_telegram_alert(signal: dict):
 
 
 def send_summary_telegram(signal_count: int, date_str: str):
-    """Sends summary message to Telegram (ALWAYS SENT, INCLUDING 0 STOCK DAYS)."""
+    """Sends summary message to Telegram (ALWAYS SENT, EVEN IF COUNT IS 0)."""
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
         return
 
@@ -289,7 +289,7 @@ def run_scanner():
     export_df.to_csv(SIGNALS_CSV, index=False)
     print(f"✅ Saved {len(export_df)} signals with web-compatible headers to {SIGNALS_CSV}.")
 
-    # 5. Dispatch Telegram Alerts
+    # 5. Dispatch Telegram Alerts for today
     if today_signals:
         print(f"📢 Sending {len(today_signals)} pre-breakout alerts for today ({latest_date})...")
         for sig in today_signals:
