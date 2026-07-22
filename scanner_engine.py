@@ -6,18 +6,18 @@ import requests
 from datetime import datetime
 
 # ==========================================
-# CONFIGURATION (HIGH-QUALITY PRE-BREAKOUT)
+# CONFIGURATION (STRICT HIGH-CONVICTION)
 # ==========================================
 DB_PATH = "data/candles.duckdb"
 SIGNALS_CSV = "data/signals.csv"
 
 COMPRESSION_MAX = 0.05       # 5% Max Compression Range
-PROXIMITY_MAX_PCT = 0.018    # Close must be within 1.8% of High5/Low5 Trigger
-TARGET_X = 3.0              # Target = Entry + (Entry - SL) * 3.0
+PROXIMITY_MAX_PCT = 0.015    # MUST BE WITHIN 1.5% OF BREAKOUT TRIGGER
+TARGET_X = 3.0              # 3x Target
 
 EMA_PERIOD = 20
 ADX_PERIOD = 14
-MIN_ADX = 20.0              # Aligned with BOBD logic
+MIN_ADX = 20.0              # BOBD Standard ADX
 APPLY_EMA_FILTER = True
 APPLY_ADX_FILTER = True
 
@@ -27,7 +27,6 @@ DASHBOARD_URL = "https://brahmastra-tech.github.io/brahmastra-scanner/"
 
 
 def calc_adx(df, period=14):
-    """Exact ADX calculation aligned with BOBD_Fixedv3.py."""
     if df is None or len(df) < period + 2:
         return pd.Series([np.nan] * len(df), index=df.index)
 
@@ -57,24 +56,17 @@ def calc_adx(df, period=14):
 
 
 def scan_symbol_exact(symbol, df_sym):
-    """
-    FRESH PRE-BREAKOUT WATCHLIST:
-    Scans for tight compression near trigger levels with EMA and ADX confirmation.
-    """
     alerts = []
     if df_sym.empty or len(df_sym) < 20:
         return alerts
 
     df = df_sym.copy().sort_values("Date").reset_index(drop=True)
     
-    # Rolling Setup Metrics
     df['High5'] = df['High'].rolling(5).max()
     df['Low5'] = df['Low'].rolling(5).min()
     df['AvgVol10'] = df['Volume'].rolling(10).mean()
     df['PrevClose'] = df['Close'].shift(1)
     df['Compression'] = (df['High5'] - df['Low5']) / df['PrevClose']
-    
-    # Indicators
     df['EMA20'] = df['Close'].ewm(span=EMA_PERIOD, adjust=False).mean()
     df['ADX'] = calc_adx(df, period=ADX_PERIOD)
 
@@ -94,19 +86,17 @@ def scan_symbol_exact(symbol, df_sym):
         except Exception:
             continue
 
-        # Core Compression & Volume Filter
         if compression <= COMPRESSION_MAX and volume < avgvol:
 
-            # ADX Filter
             if APPLY_ADX_FILTER and adx < MIN_ADX:
                 continue
 
-            # PRE_BREAKOUT WATCHLIST
+            # PRE_BREAKOUT
             if close >= ema:
                 if APPLY_EMA_FILTER and (pd.isna(ema) or close < ema):
                     continue
 
-                # Ensure price is close to breakout level (within 1.8%)
+                # STRICT PROXIMITY FILTER: Close must be within 1.5% of High5
                 dist_to_trigger = (high5 - close) / close
                 if dist_to_trigger > PROXIMITY_MAX_PCT:
                     continue
@@ -134,12 +124,12 @@ def scan_symbol_exact(symbol, df_sym):
                     "adx": round(adx, 2)
                 })
 
-            # PRE_BREAKDOWN WATCHLIST
+            # PRE_BREAKDOWN
             elif close < ema:
                 if APPLY_EMA_FILTER and (pd.isna(ema) or close > ema):
                     continue
 
-                # Ensure price is close to breakdown level (within 1.8%)
+                # STRICT PROXIMITY FILTER: Close must be within 1.5% of Low5
                 dist_to_trigger = (close - low5) / close
                 if dist_to_trigger > PROXIMITY_MAX_PCT:
                     continue
@@ -171,9 +161,7 @@ def scan_symbol_exact(symbol, df_sym):
 
 
 def send_telegram_alert(signal: dict):
-    """Sends individual alert to Telegram."""
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
-        print("⚠️ Telegram credentials missing. Skipping individual alert.")
         return
 
     symbol = signal["symbol"]
@@ -219,23 +207,17 @@ def send_telegram_alert(signal: dict):
         "disable_web_page_preview": True
     }
     try:
-        res = requests.post(url, json=payload, timeout=10)
-        if res.status_code == 200:
-            print(f"✅ Telegram alert sent for {symbol}")
-        else:
-            print(f"❌ Telegram API Error ({res.status_code}): {res.text}")
+        requests.post(url, json=payload, timeout=10)
     except Exception as e:
-        print(f"❌ Exception sending Telegram alert: {e}")
+        print(f"Error: {e}")
 
 
 def send_summary_telegram(signal_count: int, date_str: str):
-    """Sends summary message to Telegram."""
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
-        print("⚠️ Telegram credentials missing. Skipping summary dispatch.")
         return
 
     if signal_count > 0:
-        status_text = f"📊 <b>High-Quality Watchlist Candidates Found Today:</b> {signal_count}"
+        status_text = f"📊 <b>High-Conviction Pre-Breakout Candidates Found Today:</b> {signal_count}"
     else:
         status_text = f"ℹ️ <b>No Qualified Pre-Breakout Stocks Found Today (0 Stocks)</b>"
 
@@ -256,26 +238,16 @@ def send_summary_telegram(signal_count: int, date_str: str):
         "disable_web_page_preview": False
     }
     try:
-        res = requests.post(url, json=payload, timeout=10)
-        if res.status_code == 200:
-            print(f"✅ Telegram summary sent for {date_str}")
-        else:
-            print(f"❌ Telegram Summary API Error ({res.status_code}): {res.text}")
+        requests.post(url, json=payload, timeout=10)
     except Exception as e:
-        print(f"❌ Exception sending Telegram summary: {e}")
+        print(f"Error: {e}")
 
 
 def run_scanner():
-    print("🚀 Initializing Pre-Breakout Scanner Engine...")
-    print(f"🔑 Telegram Secret Status: Bot Token={'FOUND' if TELEGRAM_BOT_TOKEN else 'MISSING'}, Chat ID={'FOUND' if TELEGRAM_CHAT_ID else 'MISSING'}")
-
     if not os.path.exists(DB_PATH):
-        print(f"❌ Database file not found at {DB_PATH}!")
         return
 
     conn = duckdb.connect(DB_PATH)
-    
-    # 1. Fetch candles from DuckDB
     df_raw = conn.execute("""
         SELECT symbol AS Symbol, CAST(timestamp AS DATE) AS Date, open AS Open, high AS High, low AS Low, close AS Close, volume AS Volume
         FROM ohlcv_candles
@@ -283,16 +255,12 @@ def run_scanner():
     """).df()
 
     if df_raw.empty:
-        print("⚠️ No candles available in DuckDB.")
         return
 
     latest_date = pd.to_datetime(df_raw['Date'].max()).strftime("%d-%m-%Y")
-    print(f"🔍 Database Market Date: {latest_date} | Total Symbols: {df_raw['Symbol'].nunique()}")
-
     symbols = df_raw['Symbol'].unique()
     all_signals = []
 
-    # 2. Iterate per symbol
     for sym in symbols:
         df_sym = df_raw[df_raw['Symbol'] == sym]
         alerts = scan_symbol_exact(sym, df_sym)
@@ -302,15 +270,14 @@ def run_scanner():
     os.makedirs("data", exist_ok=True)
 
     if not all_signals:
-        print("ℹ️ No pre-breakout signals matched conditions overall.")
         pd.DataFrame(columns=['date', 'symbol', 'timeframe', 'type', 'pattern', 'entry', 'sl', 'target', 'close', 'compression', 'avgvol10', 'volume', 'ema', 'ema_dist_pct', 'adx']).to_csv(SIGNALS_CSV, index=False)
         send_summary_telegram(0, latest_date)
         return
 
-    # 3. Save History: Deduplicate per Date + Symbol + Pattern (keeps fresh setup per date)
     all_df = pd.DataFrame(all_signals)
     all_df["Date_DT"] = pd.to_datetime(all_df["date"], format="%d-%m-%Y")
 
+    # Group by Date + Symbol + Pattern so each date retains its fresh candidates
     all_df = (
         all_df.sort_values("Date_DT")
               .drop_duplicates(subset=["date", "symbol", "pattern"], keep="last")
@@ -319,20 +286,13 @@ def run_scanner():
 
     export_df = all_df.drop(columns=["Date_DT"])
     export_df.to_csv(SIGNALS_CSV, index=False)
-    print(f"✅ Saved {len(export_df)} quality signals to {SIGNALS_CSV}.")
 
-    # 4. Identify today's candidates
     today_signals = export_df[export_df['date'] == latest_date].to_dict('records')
-    print(f"📊 Fresh Quality Candidates for Today ({latest_date}): {len(today_signals)}")
 
-    # 5. Dispatch Telegram Alerts
     if today_signals:
         for sig in today_signals:
             send_telegram_alert(sig)
-    else:
-        print(f"ℹ️ 0 candidates for today ({latest_date}).")
 
-    # 6. Always send completion summary
     send_summary_telegram(len(today_signals), latest_date)
 
 
