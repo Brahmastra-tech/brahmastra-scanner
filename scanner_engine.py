@@ -14,6 +14,7 @@ TARGET_X = 3.0
 
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN") or os.getenv("TELEGRAM_TOKEN") or os.getenv("BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID") or os.getenv("CHAT_ID")
+DASHBOARD_URL = "https://brahmastra-tech.github.io/brahmastra-scanner/"
 
 
 def calc_adx(df, period=14):
@@ -339,8 +340,46 @@ def send_telegram_alert(signal: dict):
         print(f"❌ Exception sending Telegram alert: {e}")
 
 
+def send_summary_telegram(signals_today: list, date_str: str):
+    """Sends scan summary to Telegram with Long & Short breakdowns."""
+    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
+        print("⚠️ Telegram credentials missing. Skipping summary dispatch.")
+        return
+
+    breakouts = [s for s in signals_today if s.get("Type") == "PRE_BREAKOUT"]
+    breakdowns = [s for s in signals_today if s.get("Type") == "PRE_BREAKDOWN"]
+    total_count = len(signals_today)
+
+    message = (
+        f"🏁 <b>DAILY SCAN COMPLETE ({date_str})</b>\n"
+        f"━━━━━━━━━━━━━━━━━━━━\n"
+        f"📊 <b>Total Candidates Found Today:</b> {total_count}\n"
+        f"🚀 <b>Pre-Breakout (Long | RSI > 52)   :</b> {len(breakouts)}\n"
+        f"📉 <b>Pre-Breakdown (Short | RSI < 48)  :</b> {len(breakdowns)}\n\n"
+        f"🌐 <b>Interactive Web Dashboard & Full History:</b>\n"
+        f"👉 <a href='{DASHBOARD_URL}'>{DASHBOARD_URL}</a>\n"
+        f"━━━━━━━━━━━━━━━━━━━━"
+    )
+
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+    payload = {
+        "chat_id": TELEGRAM_CHAT_ID,
+        "text": message,
+        "parse_mode": "HTML",
+        "disable_web_page_preview": False
+    }
+    try:
+        res = requests.post(url, json=payload, timeout=10)
+        if res.status_code == 200:
+            print(f"✅ Telegram summary sent for {date_str}")
+        else:
+            print(f"❌ Telegram Summary API Error ({res.status_code}): {res.text}")
+    except Exception as e:
+        print(f"❌ Exception sending Telegram summary: {e}")
+
+
 def run_scanner():
-    print("🚀 Running Pre-Breakout Scanner Engine...")
+    print("🚀 Initializing Pre-Breakout Scanner Engine...")
 
     if not os.path.exists(DB_PATH):
         print(f"❌ Database file not found at {DB_PATH}!")
@@ -362,22 +401,42 @@ def run_scanner():
     print(f"🔍 Database Market Date: {latest_date} | Total Symbols: {df_raw['Symbol'].nunique()}")
 
     symbols = df_raw['Symbol'].unique()
-    today_signals = []
+    all_signals = []
 
+    # 1. Collect all signals across available historical candles
     for sym in symbols:
         df_sym = df_raw[df_raw['Symbol'] == sym]
         alerts = scan_symbol_exact(sym, df_sym)
         if alerts:
-            # Filter strictly for today's date
-            for a in alerts:
-                if a["Date"] == latest_date:
-                    today_signals.append(a)
+            all_signals.extend(alerts)
 
+    os.makedirs("data", exist_ok=True)
+
+    if not all_signals:
+        print("ℹ️ No signals matched conditions overall.")
+        pd.DataFrame(columns=['Date', 'Symbol', 'Timeframe', 'Type', 'Entry', 'SL', 'Target', 'Close', 'Compression', 'AvgVol10', 'Volume', 'EMA', 'EMA_Dist%', 'ADX', 'RSI']).to_csv(SIGNALS_CSV, index=False)
+        send_summary_telegram([], latest_date)
+        return
+
+    # 2. Export full historical backtest dataset to CSV
+    all_df = pd.DataFrame(all_signals)
+    date_col = "Date" if "Date" in all_df.columns else "date"
+    all_df["Date_DT"] = pd.to_datetime(all_df[date_col], format="%d-%m-%Y")
+
+    export_df = all_df.sort_values("Date_DT", ascending=False).drop(columns=["Date_DT"])
+    export_df.to_csv(SIGNALS_CSV, index=False)
+    print(f"✅ Saved {len(export_df)} total historical signals to {SIGNALS_CSV}.")
+
+    # 3. Extract today's signals
+    today_signals = export_df[export_df[date_col] == latest_date].to_dict('records')
     print(f"📊 Candidates for Today ({latest_date}): {len(today_signals)}")
 
-    # Send individual stock alerts directly to Telegram
+    # 4. Dispatch individual stock alerts to Telegram
     for sig in today_signals:
         send_telegram_alert(sig)
+
+    # 5. Dispatch summary message to Telegram
+    send_summary_telegram(today_signals, latest_date)
 
 
 if __name__ == "__main__":
