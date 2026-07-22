@@ -6,18 +6,19 @@ import requests
 from datetime import datetime
 
 # ==========================================
-# CONFIGURATION (STRICT HIGH-CONVICTION)
+# CONFIGURATION (STRICT INSTITUTIONAL FILTERS)
 # ==========================================
 DB_PATH = "data/candles.duckdb"
 SIGNALS_CSV = "data/signals.csv"
 
 COMPRESSION_MAX = 0.05       # 5% Max Compression Range
-PROXIMITY_MAX_PCT = 0.015    # MUST BE WITHIN 1.5% OF BREAKOUT TRIGGER
+PROXIMITY_MAX_PCT = 0.015    # Must be within 1.5% of Trigger Level
+MIN_DELIVERY_PCT = 40.0      # Minimum 40% Delivery Percentage required
 TARGET_X = 3.0              # 3x Target
 
 EMA_PERIOD = 20
 ADX_PERIOD = 14
-MIN_ADX = 20.0              # BOBD Standard ADX
+MIN_ADX = 20.0              # Standard BOBD ADX
 APPLY_EMA_FILTER = True
 APPLY_ADX_FILTER = True
 
@@ -62,6 +63,7 @@ def scan_symbol_exact(symbol, df_sym):
 
     df = df_sym.copy().sort_values("Date").reset_index(drop=True)
     
+    # Setup Metrics
     df['High5'] = df['High'].rolling(5).max()
     df['Low5'] = df['Low'].rolling(5).min()
     df['AvgVol10'] = df['Volume'].rolling(10).mean()
@@ -82,12 +84,22 @@ def scan_symbol_exact(symbol, df_sym):
             close = float(candle['Close'])
             ema = float(candle['EMA20'])
             adx = float(candle['ADX']) if pd.notnull(candle['ADX']) else 0.0
+            
+            # Extract Delivery % if present in DuckDB table
+            deliv_pct = float(candle.get('DeliveryPct', 100.0)) if 'DeliveryPct' in candle else 100.0
+            
             setup_date = pd.to_datetime(candle['Date']).strftime("%d-%m-%Y")
         except Exception:
             continue
 
+        # 1. Compression + Volume Dry up
         if compression <= COMPRESSION_MAX and volume < avgvol:
 
+            # 2. Delivery Percentage Filter (Must be >= 40%)
+            if deliv_pct < MIN_DELIVERY_PCT:
+                continue
+
+            # 3. ADX Filter
             if APPLY_ADX_FILTER and adx < MIN_ADX:
                 continue
 
@@ -96,7 +108,7 @@ def scan_symbol_exact(symbol, df_sym):
                 if APPLY_EMA_FILTER and (pd.isna(ema) or close < ema):
                     continue
 
-                # STRICT PROXIMITY FILTER: Close must be within 1.5% of High5
+                # Proximity Filter (Within 1.5% of High5)
                 dist_to_trigger = (high5 - close) / close
                 if dist_to_trigger > PROXIMITY_MAX_PCT:
                     continue
@@ -119,6 +131,7 @@ def scan_symbol_exact(symbol, df_sym):
                     "compression": round(compression, 4),
                     "avgvol10": int(avgvol),
                     "volume": int(volume),
+                    "deliv_pct": round(deliv_pct, 2),
                     "ema": round(ema, 2),
                     "ema_dist_pct": ema_dist,
                     "adx": round(adx, 2)
@@ -129,7 +142,7 @@ def scan_symbol_exact(symbol, df_sym):
                 if APPLY_EMA_FILTER and (pd.isna(ema) or close > ema):
                     continue
 
-                # STRICT PROXIMITY FILTER: Close must be within 1.5% of Low5
+                # Proximity Filter (Within 1.5% of Low5)
                 dist_to_trigger = (close - low5) / close
                 if dist_to_trigger > PROXIMITY_MAX_PCT:
                     continue
@@ -152,6 +165,7 @@ def scan_symbol_exact(symbol, df_sym):
                     "compression": round(compression, 4),
                     "avgvol10": int(avgvol),
                     "volume": int(volume),
+                    "deliv_pct": round(deliv_pct, 2),
                     "ema": round(ema, 2),
                     "ema_dist_pct": ema_dist,
                     "adx": round(adx, 2)
@@ -171,9 +185,7 @@ def send_telegram_alert(signal: dict):
     sl = signal["sl"]
     target = signal["target"]
     close = signal["close"]
-    avgvol = signal["avgvol10"]
-    volume = signal["volume"]
-    vol_ratio = round(volume / avgvol, 2) if avgvol > 0 else 1.0
+    deliv_pct = signal.get("deliv_pct", 0.0)
     ema = signal["ema"]
     adx = signal["adx"]
 
@@ -185,16 +197,16 @@ def send_telegram_alert(signal: dict):
         f"━━━━━━━━━━━━━━━━━━━━\n"
         f"📈 <b>Stock:</b> {symbol} (NSE F&O)\n"
         f"🎯 <b>Pattern:</b> {sig_type}\n"
-        f"⏱ <b>Timeframe:</b> Daily (1D) | <b>Setup Date:</b> {setup_date}\n\n"
-        f"📊 <b>ACTIONABLE TRIGGER LEVELS FOR TOMORROW</b>\n"
+        f"⏱ <b>Setup Date:</b> {setup_date}\n\n"
+        f"📊 <b>ACTIONABLE TRIGGER LEVELS</b>\n"
         f"• <b>Trigger Entry Price :</b> ₹{entry:.2f}\n"
         f"• <b>Stop Loss           :</b> ₹{sl:.2f}\n"
         f"• <b>Target (3x)         :</b> ₹{target:.2f}\n"
         f"• <b>Today's Close       :</b> ₹{close:.2f}\n\n"
-        f"⚡ <b>CONDITIONS PASSED</b>\n"
+        f"⚡ <b>CONVICTION METRICS</b>\n"
+        f"• <b>Delivery %          :</b> {deliv_pct:.1f}%\n"
         f"• <b>20 EMA              :</b> ₹{ema:.2f}\n"
         f"• <b>14 ADX              :</b> {adx:.2f}\n"
-        f"• <b>Volume Ratio        :</b> {vol_ratio:.2f}x\n"
         f"━━━━━━━━━━━━━━━━━━━━\n"
         f"📈 <a href='{chart_url}'>View {symbol} TradingView Chart</a>"
     )
@@ -206,20 +218,18 @@ def send_telegram_alert(signal: dict):
         "parse_mode": "HTML",
         "disable_web_page_preview": True
     }
-    try:
-        requests.post(url, json=payload, timeout=10)
-    except Exception as e:
-        print(f"Error: {e}")
+    requests.post(url, json=payload, timeout=10)
 
 
 def send_summary_telegram(signal_count: int, date_str: str):
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
         return
 
-    if signal_count > 0:
-        status_text = f"📊 <b>High-Conviction Pre-Breakout Candidates Found Today:</b> {signal_count}"
-    else:
-        status_text = f"ℹ️ <b>No Qualified Pre-Breakout Stocks Found Today (0 Stocks)</b>"
+    status_text = (
+        f"📊 <b>High-Delivery Pre-Breakout Candidates Today:</b> {signal_count}"
+        if signal_count > 0 else
+        f"ℹ️ <b>No Qualified High-Delivery Stocks Found Today (0 Stocks)</b>"
+    )
 
     message = (
         f"🏁 <b>DAILY SCAN COMPLETE ({date_str})</b>\n"
@@ -237,10 +247,7 @@ def send_summary_telegram(signal_count: int, date_str: str):
         "parse_mode": "HTML",
         "disable_web_page_preview": False
     }
-    try:
-        requests.post(url, json=payload, timeout=10)
-    except Exception as e:
-        print(f"Error: {e}")
+    requests.post(url, json=payload, timeout=10)
 
 
 def run_scanner():
@@ -248,11 +255,21 @@ def run_scanner():
         return
 
     conn = duckdb.connect(DB_PATH)
-    df_raw = conn.execute("""
-        SELECT symbol AS Symbol, CAST(timestamp AS DATE) AS Date, open AS Open, high AS High, low AS Low, close AS Close, volume AS Volume
-        FROM ohlcv_candles
-        ORDER BY symbol, timestamp ASC
-    """).df()
+    
+    # Ingest delivery columns if present in schema
+    try:
+        df_raw = conn.execute("""
+            SELECT symbol AS Symbol, CAST(timestamp AS DATE) AS Date, open AS Open, high AS High, low AS Low, close AS Close, volume AS Volume,
+                   delivery_pct AS DeliveryPct
+            FROM ohlcv_candles
+            ORDER BY symbol, timestamp ASC
+        """).df()
+    except Exception:
+        df_raw = conn.execute("""
+            SELECT symbol AS Symbol, CAST(timestamp AS DATE) AS Date, open AS Open, high AS High, low AS Low, close AS Close, volume AS Volume
+            FROM ohlcv_candles
+            ORDER BY symbol, timestamp ASC
+        """).df()
 
     if df_raw.empty:
         return
@@ -270,14 +287,13 @@ def run_scanner():
     os.makedirs("data", exist_ok=True)
 
     if not all_signals:
-        pd.DataFrame(columns=['date', 'symbol', 'timeframe', 'type', 'pattern', 'entry', 'sl', 'target', 'close', 'compression', 'avgvol10', 'volume', 'ema', 'ema_dist_pct', 'adx']).to_csv(SIGNALS_CSV, index=False)
+        pd.DataFrame(columns=['date', 'symbol', 'timeframe', 'type', 'pattern', 'entry', 'sl', 'target', 'close', 'compression', 'avgvol10', 'volume', 'deliv_pct', 'ema', 'ema_dist_pct', 'adx']).to_csv(SIGNALS_CSV, index=False)
         send_summary_telegram(0, latest_date)
         return
 
     all_df = pd.DataFrame(all_signals)
     all_df["Date_DT"] = pd.to_datetime(all_df["date"], format="%d-%m-%Y")
 
-    # Group by Date + Symbol + Pattern so each date retains its fresh candidates
     all_df = (
         all_df.sort_values("Date_DT")
               .drop_duplicates(subset=["date", "symbol", "pattern"], keep="last")
