@@ -57,6 +57,12 @@
             color: var(--text-muted);
         }
 
+        .header-actions {
+            display: flex;
+            align-items: center;
+            gap: 1rem;
+        }
+
         .stats-badge {
             background: rgba(59, 130, 246, 0.1);
             color: var(--accent-blue);
@@ -67,6 +73,26 @@
             border: 1px solid rgba(59, 130, 246, 0.2);
         }
 
+        .btn-export {
+            background-color: rgba(59, 130, 246, 0.15);
+            color: var(--text-main);
+            padding: 0.5rem 1rem;
+            border-radius: 0.5rem;
+            font-size: 0.875rem;
+            font-weight: 600;
+            border: 1px solid rgba(59, 130, 246, 0.3);
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+            transition: all 0.2s;
+        }
+
+        .btn-export:hover {
+            background-color: var(--accent-blue);
+            color: #ffffff;
+        }
+
         .controls {
             display: flex;
             gap: 1rem;
@@ -74,7 +100,7 @@
             flex-wrap: wrap;
         }
 
-        .search-box, .filter-select {
+        .search-box, .filter-select, .date-picker {
             background-color: var(--card-bg);
             border: 1px solid var(--border-color);
             color: var(--text-main);
@@ -87,6 +113,14 @@
         .search-box {
             flex-grow: 1;
             min-width: 250px;
+        }
+
+        .date-picker-wrapper {
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+            color: var(--text-muted);
+            font-size: 0.875rem;
         }
 
         .table-container {
@@ -186,11 +220,20 @@
                 <p>NSE F&O Pre-Breakout Watchlist & Signal Terminal</p>
             </div>
         </div>
-        <div class="stats-badge" id="signalCount">Loading Signals...</div>
+        <div class="header-actions">
+            <div class="stats-badge" id="signalCount">Loading...</div>
+            <button class="btn-export" id="exportBtn">📥 Export CSV</button>
+        </div>
     </div>
 
     <div class="controls">
         <input type="text" id="searchInput" class="search-box" placeholder="Search Symbol (e.g. RELIANCE, TITAN)...">
+        
+        <div class="date-picker-wrapper">
+            <span>Date:</span>
+            <input type="date" id="dateFilter" class="date-picker">
+        </div>
+
         <select id="patternFilter" class="filter-select">
             <option value="ALL">All Patterns</option>
             <option value="PRE_BREAKOUT">PRE_BREAKOUT</option>
@@ -224,6 +267,7 @@
     <script src="https://cdnjs.cloudflare.com/ajax/libs/PapaParse/5.3.2/papaparse.min.js"></script>
     <script>
         let allData = [];
+        let filteredData = [];
 
         fetch('data/signals.csv')
             .then(response => {
@@ -238,6 +282,7 @@
                     skipEmptyLines: true,
                     complete: function(results) {
                         allData = results.data;
+                        filteredData = allData;
                         document.getElementById('signalCount').innerText = `${allData.length} Total Signals`;
                         renderTable(allData);
                     }
@@ -295,25 +340,54 @@
             });
         }
 
+        // Listeners for Search, Date, and Pattern Filters
         document.getElementById('searchInput').addEventListener('input', filterData);
+        document.getElementById('dateFilter').addEventListener('change', filterData);
         document.getElementById('patternFilter').addEventListener('change', filterData);
 
         function filterData() {
             const searchVal = document.getElementById('searchInput').value.toUpperCase();
             const patternVal = document.getElementById('patternFilter').value;
+            const dateVal = document.getElementById('dateFilter').value; // Formats as YYYY-MM-DD
 
-            const filtered = allData.filter(row => {
+            let formattedSearchDate = '';
+            if (dateVal) {
+                const parts = dateVal.split('-'); // [YYYY, MM, DD]
+                formattedSearchDate = `${parts[2]}-${parts[1]}-${parts[0]}`; // Convert to DD-MM-YYYY
+            }
+
+            filteredData = allData.filter(row => {
                 const symbol = (row.symbol || row.Symbol || '').toUpperCase();
                 const pattern = (row.pattern || row.type || row.Type || '').toUpperCase();
+                const rowDate = (row.date || row.Date || '');
 
                 const matchesSearch = symbol.includes(searchVal);
                 const matchesPattern = patternVal === 'ALL' || pattern.includes(patternVal);
+                const matchesDate = !formattedSearchDate || rowDate === formattedSearchDate;
 
-                return matchesSearch && matchesPattern;
+                return matchesSearch && matchesPattern && matchesDate;
             });
 
-            renderTable(filtered);
+            renderTable(filteredData);
         }
+
+        // Export Filtered CSV Handler
+        document.getElementById('exportBtn').addEventListener('click', () => {
+            if (!filteredData || filteredData.length === 0) {
+                alert('No data available to export.');
+                return;
+            }
+
+            const csv = Papa.unparse(filteredData);
+            const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+            const url = URL.createObjectURL(blob);
+            const link = document.createElement('a');
+            link.setAttribute('href', url);
+            link.setAttribute('download', 'brahmastra_signals.csv');
+            document.body.appendChild(link);
+            link.click();
+            document.body.removeChild(link);
+        });
     </script>
 </body>
 </html>
