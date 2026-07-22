@@ -25,7 +25,7 @@ DASHBOARD_URL = "https://brahmastra-tech.github.io/brahmastra-scanner/"
 
 
 def calc_adx(df, period=14):
-    """Exact ADX calculation aligned with BOBD_Fixedv3.py."""
+    """ADX calculation aligned with BOBD_Fixedv3.py."""
     if df is None or len(df) < period + 2:
         return pd.Series([np.nan] * len(df), index=df.index)
 
@@ -56,8 +56,8 @@ def calc_adx(df, period=14):
 
 def scan_symbol_exact(symbol, df_sym):
     """
-    Exact scan logic derived from BOBD_Fixedv3.py
-    Enforces setup on candle i, breakout on candle i+1, plus mandatory EMA/ADX filters.
+    Derived from BOBD_Fixedv3.py logic:
+    Setup on candle i, trigger on candle i+1 + mandatory EMA/ADX filters.
     """
     alerts = []
     if df_sym.empty or len(df_sym) < 20:
@@ -78,8 +78,8 @@ def scan_symbol_exact(symbol, df_sym):
 
     # Iterate through candle history
     for i in range(len(df) - 1):
-        prev = df.iloc[i]      # Setup Candle (Candle i)
-        day1 = df.iloc[i + 1]  # Trigger Candle (Candle i+1)
+        prev = df.iloc[i]      # Setup Candle (i)
+        day1 = df.iloc[i + 1]  # Trigger Candle (i+1)
 
         try:
             compression = float(prev['Compression'])
@@ -95,17 +95,16 @@ def scan_symbol_exact(symbol, df_sym):
         except Exception:
             continue
 
-        # 1. Base Setup Condition on Setup Candle
+        # 1. Setup Condition
         if compression <= COMPRESSION_MAX and volume < avgvol:
             
             # MANDATORY EMA & ADX FILTERS
             if day1_adx < MIN_ADX or pd.isna(day1_ema):
                 continue
 
-            # 2. PRE_BREAKOUT Trigger (Close > Prev High5 AND Close > EMA20)
+            # 2. PRE_BREAKOUT Trigger
             if day1_close > high5 and day1_close > day1_ema:
                 entry = round(high5, 2)
-                # Tighter SL option: MAX of Low5 or 1.5% max risk
                 sl = round(max(low5, entry * (1 - MAX_SL_PCT)), 2)
                 tgt = round(entry + (entry - sl) * TARGET_X, 2)
 
@@ -123,7 +122,7 @@ def scan_symbol_exact(symbol, df_sym):
                     "VolRatio": round(float(day1['Volume']) / avgvol, 2) if avgvol > 0 else 1.0
                 })
 
-            # 3. PRE_BREAKDOWN Trigger (Close < Prev Low5 AND Close < EMA20)
+            # 3. PRE_BREAKDOWN Trigger
             elif day1_close < low5 and day1_close < day1_ema:
                 entry = round(low5, 2)
                 sl = round(min(high5, entry * (1 + MAX_SL_PCT)), 2)
@@ -241,7 +240,7 @@ def run_scanner():
     symbols = df_raw['Symbol'].unique()
     all_signals = []
 
-    # 2. Iterate per symbol to ensure 100% exact technical calculation
+    # 2. Iterate per symbol
     for sym in symbols:
         df_sym = df_raw[df_raw['Symbol'] == sym]
         alerts = scan_symbol_exact(sym, df_sym)
@@ -254,14 +253,13 @@ def run_scanner():
 
     df_signals = pd.DataFrame(all_signals)
 
-    # 3. First Instance Filter (Remove consecutive duplicate signals)
+    # 3. First Instance Filter (Remove consecutive duplicates)
     df_signals['Date_DT'] = pd.to_datetime(df_signals['Date'], format="%d-%m-%Y")
     df_signals = df_signals.sort_values(['Symbol', 'Type', 'Date_DT'])
     
     df_signals['Prev_Date'] = df_signals.groupby(['Symbol', 'Type'])['Date_DT'].shift(1)
     df_signals['Days_Diff'] = (df_signals['Date_DT'] - df_signals['Prev_Date']).dt.days
 
-    # Keep only first instance (where gap > 1 day or first time trigger)
     first_instance = df_signals[df_signals['Days_Diff'].isna() | (df_signals['Days_Diff'] > 1)].copy()
     first_instance = first_instance.sort_values('Date_DT', ascending=False)
 
@@ -273,7 +271,7 @@ def run_scanner():
     export_df.to_csv(SIGNALS_CSV, index=False)
     print(f"✅ Saved {len(export_df)} accurate historical signals to {SIGNALS_CSV}.")
 
-    # 4. Dispatch Telegram Alerts for Today's Date
+    # 4. Dispatch Telegram Alerts
     today_signals = export_df[export_df['date'] == latest_date].to_dict('records')
     
     if today_signals:
