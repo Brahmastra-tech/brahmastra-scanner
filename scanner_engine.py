@@ -6,22 +6,19 @@ import requests
 from datetime import datetime
 
 # ==========================================
-# CONFIGURATION (Matching BOBD GUI Logic)
+# CONFIGURATION (100% BOBD GUI PARITY)
 # ==========================================
 DB_PATH = "data/candles.duckdb"
 SIGNALS_CSV = "data/signals.csv"
 
-# Core Setup Parameters
-COMPRESSION_MAX = 0.05   # 5% compression range
-TARGET_X = 3.0          # Target = SL * 3.0
-MAX_SL_PCT = 0.015      # 1.5% Max Stop Loss Cap (Set to None if you want raw Low5/High5)
+COMPRESSION_MAX = 0.05   # 5% Compression
+TARGET_X = 3.0          # Target = Entry + (Entry - SL) * 3.0
 
-# Indicator Filters
-APPLY_EMA_FILTER = True # Enforce Close > EMA20 for Breakout / Close < EMA20 for Breakdown
-APPLY_ADX_FILTER = True # Enforce ADX >= MIN_ADX
 EMA_PERIOD = 20
 ADX_PERIOD = 14
 MIN_ADX = 20.0
+APPLY_EMA_FILTER = True
+APPLY_ADX_FILTER = True
 
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
@@ -29,7 +26,7 @@ DASHBOARD_URL = "https://brahmastra-tech.github.io/brahmastra-scanner/"
 
 
 def calc_adx(df, period=14):
-    """Exact ADX calculation matching BOBD_Fixedv3.py."""
+    """Exact ADX calculation aligned with BOBD_Fixedv3.py."""
     if df is None or len(df) < period + 2:
         return pd.Series([np.nan] * len(df), index=df.index)
 
@@ -60,8 +57,9 @@ def calc_adx(df, period=14):
 
 def scan_symbol_exact(symbol, df_sym):
     """
-    Exact scan logic mirroring BOBD_Fixedv3.py
-    Setup candle i -> Trigger candle i+1
+    Exact scan logic mirroring BOBD_Fixedv3.py (abv.csv format):
+    - Uses Setup Candle i Date
+    - Uses Raw Low5/High5 for SL
     """
     alerts = []
     if df_sym.empty or len(df_sym) < 20:
@@ -69,21 +67,20 @@ def scan_symbol_exact(symbol, df_sym):
 
     df = df_sym.copy().sort_values("Date").reset_index(drop=True)
     
-    # 1. Rolling Setup Metrics
+    # Rolling Setup Metrics
     df['High5'] = df['High'].rolling(5).max()
     df['Low5'] = df['Low'].rolling(5).min()
     df['AvgVol10'] = df['Volume'].rolling(10).mean()
     df['PrevClose'] = df['Close'].shift(1)
     df['Compression'] = (df['High5'] - df['Low5']) / df['PrevClose']
     
-    # 2. Indicators Pre-calculated Across Continuous Series
+    # Indicators
     df['EMA20'] = df['Close'].ewm(span=EMA_PERIOD, adjust=False).mean()
     df['ADX'] = calc_adx(df, period=ADX_PERIOD)
 
-    # 3. Step Through Candle Series
     for i in range(len(df) - 1):
-        prev = df.iloc[i]      # Candle i (Compression Setup)
-        day1 = df.iloc[i + 1]  # Candle i+1 (Breakout / Trigger)
+        prev = df.iloc[i]      # Setup Candle i (Date assigned from here)
+        day1 = df.iloc[i + 1]  # Trigger Candle i+1
 
         try:
             compression = float(prev['Compression'])
@@ -95,14 +92,16 @@ def scan_symbol_exact(symbol, df_sym):
             day1_close = float(day1['Close'])
             day1_ema = float(day1['EMA20'])
             day1_adx = float(day1['ADX']) if pd.notnull(day1['ADX']) else 0.0
-            trigger_date = pd.to_datetime(day1['Date']).strftime("%d-%m-%Y")
+            
+            # Attributed to SETUP CANDLE DATE (matches abv.csv)
+            setup_date = pd.to_datetime(prev['Date']).strftime("%d-%m-%Y")
         except Exception:
             continue
 
-        # Core Compression Setup Check (Candle i)
+        # 1. Base Setup Condition (Compression + Low Volume)
         if compression <= COMPRESSION_MAX and volume < avgvol:
 
-            # --- OPTIONAL / MANDATORY FILTER CHECKS ---
+            # ADX Filter
             if APPLY_ADX_FILTER and day1_adx < MIN_ADX:
                 continue
 
@@ -112,21 +111,25 @@ def scan_symbol_exact(symbol, df_sym):
                     continue
 
                 entry = round(high5, 2)
-                sl = round(max(low5, entry * (1 - MAX_SL_PCT)), 2) if MAX_SL_PCT else round(low5, 2)
+                sl = round(low5, 2)  # Raw Low5 (matches abv.csv)
                 tgt = round(entry + (entry - sl) * TARGET_X, 2)
+                ema_dist = round(abs(day1_close - day1_ema) / day1_ema * 100, 2) if pd.notnull(day1_ema) and day1_ema > 0 else 0.0
 
                 alerts.append({
-                    "Date": trigger_date,
+                    "Date": setup_date,
                     "Symbol": symbol,
+                    "Timeframe": "D",
                     "Type": "PRE_BREAKOUT",
                     "Entry": entry,
                     "SL": sl,
                     "Target": tgt,
                     "Close": round(day1_close, 2),
-                    "EMA": round(day1_ema, 2) if pd.notnull(day1_ema) else None,
-                    "ADX": round(day1_adx, 2),
                     "Compression": round(compression, 4),
-                    "VolRatio": round(float(day1['Volume']) / avgvol, 2) if avgvol > 0 else 1.0
+                    "AvgVol10": int(avgvol),
+                    "Volume": int(day1['Volume']),
+                    "EMA": round(day1_ema, 2) if pd.notnull(day1_ema) else 0.0,
+                    "EMA_Dist%": ema_dist,
+                    "ADX": round(day1_adx, 2)
                 })
 
             # PRE_BREAKDOWN
@@ -135,21 +138,25 @@ def scan_symbol_exact(symbol, df_sym):
                     continue
 
                 entry = round(low5, 2)
-                sl = round(min(high5, entry * (1 + MAX_SL_PCT)), 2) if MAX_SL_PCT else round(high5, 2)
+                sl = round(high5, 2)  # Raw High5 (matches abv.csv)
                 tgt = round(entry - (sl - entry) * TARGET_X, 2)
+                ema_dist = round(abs(day1_close - day1_ema) / day1_ema * 100, 2) if pd.notnull(day1_ema) and day1_ema > 0 else 0.0
 
                 alerts.append({
-                    "Date": trigger_date,
+                    "Date": setup_date,
                     "Symbol": symbol,
+                    "Timeframe": "D",
                     "Type": "PRE_BREAKDOWN",
                     "Entry": entry,
                     "SL": sl,
                     "Target": tgt,
                     "Close": round(day1_close, 2),
-                    "EMA": round(day1_ema, 2) if pd.notnull(day1_ema) else None,
-                    "ADX": round(day1_adx, 2),
                     "Compression": round(compression, 4),
-                    "VolRatio": round(float(day1['Volume']) / avgvol, 2) if avgvol > 0 else 1.0
+                    "AvgVol10": int(avgvol),
+                    "Volume": int(day1['Volume']),
+                    "EMA": round(day1_ema, 2) if pd.notnull(day1_ema) else 0.0,
+                    "EMA_Dist%": ema_dist,
+                    "ADX": round(day1_adx, 2)
                 })
 
     return alerts
@@ -160,16 +167,18 @@ def send_telegram_alert(signal: dict):
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
         return
 
-    symbol = signal["symbol"]
-    sig_type = signal["type"]
-    date_str = signal["date"]
-    entry = signal["entry"]
-    sl = signal["sl"]
-    target = signal["target"]
-    close = signal["close"]
-    vol_ratio = signal["vol_ratio"]
-    ema = signal["ema"]
-    adx = signal["adx"]
+    symbol = signal["Symbol"]
+    sig_type = signal["Type"]
+    date_str = signal["Date"]
+    entry = signal["Entry"]
+    sl = signal["SL"]
+    target = signal["Target"]
+    close = signal["Close"]
+    avgvol = signal["AvgVol10"]
+    volume = signal["Volume"]
+    vol_ratio = round(volume / avgvol, 2) if avgvol > 0 else 1.0
+    ema = signal["EMA"]
+    adx = signal["ADX"]
 
     emoji = "🚀" if sig_type == "PRE_BREAKOUT" else "📉"
     
@@ -178,15 +187,15 @@ def send_telegram_alert(signal: dict):
         f"━━━━━━━━━━━━━━━━━━━━\n"
         f"📈 <b>Stock:</b> {symbol} (NSE F&O)\n"
         f"🎯 <b>Pattern:</b> {sig_type}\n"
-        f"⏱ <b>Timeframe:</b> Daily (1D) | <b>Trigger Date:</b> {date_str}\n\n"
+        f"⏱ <b>Timeframe:</b> Daily (1D) | <b>Setup Date:</b> {date_str}\n\n"
         f"📊 <b>TRADE LEVELS</b>\n"
         f"• <b>Entry Price :</b> ₹{entry:.2f}\n"
         f"• <b>Stop Loss   :</b> ₹{sl:.2f}\n"
         f"• <b>Target (3x) :</b> ₹{target:.2f}\n"
         f"• <b>Close Price :</b> ₹{close:.2f}\n\n"
         f"⚡ <b>INDICATORS</b>\n"
-        f"• <b>20 EMA       :</b> ₹{ema if ema else 'N/A'}\n"
-        f"• <b>14 ADX       :</b> {adx}\n"
+        f"• <b>20 EMA       :</b> ₹{ema:.2f}\n"
+        f"• <b>14 ADX       :</b> {adx:.2f}\n"
         f"• <b>Volume Ratio :</b> {vol_ratio:.2f}x\n"
         f"━━━━━━━━━━━━━━━━━━━━\n"
         f"📈 <a href='https://in.tradingview.com/chart/?symbol=NSE:{symbol}'>View TradingView Chart</a>"
@@ -261,28 +270,17 @@ def run_scanner():
         print("ℹ️ No signals matched conditions.")
         return
 
-    df_signals = pd.DataFrame(all_signals)
-
-    # 3. First Instance Filter (Deduplicate consecutive triggers)
-    df_signals['Date_DT'] = pd.to_datetime(df_signals['Date'], format="%d-%m-%Y")
-    df_signals = df_signals.sort_values(['Symbol', 'Type', 'Date_DT'])
-    
-    df_signals['Prev_Date'] = df_signals.groupby(['Symbol', 'Type'])['Date_DT'].shift(1)
-    df_signals['Days_Diff'] = (df_signals['Date_DT'] - df_signals['Prev_Date']).dt.days
-
-    first_instance = df_signals[df_signals['Days_Diff'].isna() | (df_signals['Days_Diff'] > 1)].copy()
-    first_instance = first_instance.sort_values('Date_DT', ascending=False)
-
-    # Export to CSV
-    export_df = first_instance[['Date', 'Symbol', 'Type', 'Entry', 'SL', 'Target', 'Close', 'EMA', 'ADX', 'Compression', 'VolRatio']]
-    export_df.columns = ['date', 'symbol', 'type', 'entry', 'sl', 'target', 'close', 'ema', 'adx', 'compression', 'vol_ratio']
+    # 3. Export to CSV matching exact abv.csv schema
+    export_df = pd.DataFrame(all_signals)
+    export_df['Date_DT'] = pd.to_datetime(export_df['Date'], format="%d-%m-%Y")
+    export_df = export_df.sort_values('Date_DT', ascending=False).drop(columns=['Date_DT'])
 
     os.makedirs("data", exist_ok=True)
     export_df.to_csv(SIGNALS_CSV, index=False)
-    print(f"✅ Saved {len(export_df)} signals to {SIGNALS_CSV}.")
+    print(f"✅ Saved {len(export_df)} signals matching abv.csv format to {SIGNALS_CSV}.")
 
-    # 4. Dispatch Telegram Alerts for Today
-    today_signals = export_df[export_df['date'] == latest_date].to_dict('records')
+    # 4. Dispatch Telegram Alerts for Latest Market Date
+    today_signals = export_df[export_df['Date'] == latest_date].to_dict('records')
     
     if today_signals:
         print(f"📢 Sending {len(today_signals)} alerts for today ({latest_date})...")
