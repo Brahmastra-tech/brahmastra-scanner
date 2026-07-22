@@ -73,15 +73,15 @@ def scan_symbol_exact(symbol, df_sym):
         # Delivery Spike check (handles 0 prev volume gracefully)
         if prev_deliv_qty > 0:
             deliv_spike_ratio = deliv_qty / prev_deliv_qty
-            c2_deliv_spike = deliv_spike_ratio >= 3
+            c2_deliv_spike = deliv_spike_ratio >= 1.5
         else:
-            deliv_spike_ratio = 3
+            deliv_spike_ratio = 1.5
             c2_deliv_spike = True
 
-        c3_deliv_pct = deliv_pct >= 55.0                           # Delivery %
-        c4_close_min = close_p >= (open_p * 0.99)                # Open-Close candle range
+        c3_deliv_pct = deliv_pct >= 45.0                           # Delivery %
+        c4_close_min = close_p >= (open_p * 0.985)                # Open-Close candle range
         c5_close_max = close_p <= (open_p * 1.025)
-        c6_range_squeeze = (high_p - low_p) <= (close_p * 0.03)   # Range Squeeze (High - Low <= 3%)
+        c6_range_squeeze = (high_p - low_p) <= (close_p * 0.04)   # Range Squeeze (High - Low <= 4%)
 
         if not (c1_vol and c2_deliv_spike and c3_deliv_pct and c4_close_min and c5_close_max and c6_range_squeeze):
             continue
