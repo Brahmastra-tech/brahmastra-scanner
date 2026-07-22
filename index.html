@@ -3,13 +3,9 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Brahmastra Scanner | Professional Terminal</title>
-    <!-- Tailwind CSS -->
+    <title>Brahmastra Scanner | Terminal</title>
     <script src="https://cdn.tailwindcss.com"></script>
-    <!-- PapaParse for CSV Reading -->
     <script src="https://cdnjs.cloudflare.com/ajax/libs/PapaParse/5.4.1/papaparse.min.js"></script>
-    <!-- TradingView Lightweight Charts -->
-    <script src="https://unpkg.com/lightweight-charts/dist/lightweight-charts.standalone.production.js"></script>
     <style>
         body { background-color: #0d1117; color: #c9d1d9; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
         .glass { background: rgba(22, 27, 34, 0.8); backdrop-filter: blur(12px); border: 1px solid rgba(48, 54, 61, 0.6); }
@@ -23,24 +19,32 @@
             <span class="text-2xl">🚀</span>
             <div>
                 <h1 class="text-xl font-bold text-white tracking-wide">BRAHMASTRA SCANNER</h1>
-                <p class="text-xs text-gray-400">NSE F&O Volatility Compression Signals</p>
+                <p class="text-xs text-gray-400">NSE F&O Filtered Signal Dashboard</p>
             </div>
         </div>
         <div class="flex items-center space-x-4">
-            <span id="signalCount" class="bg-blue-900/50 text-blue-300 border border-blue-700 text-xs px-3 py-1 rounded-full font-mono">0 Signals Loaded</span>
-            <a href="data/signals.csv" download class="bg-gray-800 hover:bg-gray-700 text-gray-200 text-xs px-3 py-2 rounded-lg border border-gray-700 transition">📥 Download CSV</a>
+            <span id="signalCount" class="bg-blue-900/50 text-blue-300 border border-blue-700 text-xs px-3 py-1 rounded-full font-mono">0 Signals</span>
+            <a href="data/signals.csv" download class="bg-gray-800 hover:bg-gray-700 text-gray-200 text-xs px-3 py-2 rounded-lg border border-gray-700 transition">📥 Export CSV</a>
         </div>
     </header>
 
     <!-- Main Container -->
     <main class="max-w-7xl mx-auto px-4 mt-8">
 
-        <!-- Controls Bar -->
+        <!-- Controls & Search Bar -->
         <div class="glass rounded-xl p-4 mb-6 flex flex-wrap gap-4 items-center justify-between">
-            <div class="flex items-center gap-3 flex-1 min-w-[280px]">
-                <input type="text" id="searchInput" placeholder="Search by Symbol (e.g. RELIANCE, TATASTEEL)..." 
+            <div class="flex items-center gap-3 flex-1 min-w-[240px]">
+                <input type="text" id="searchInput" placeholder="Search Symbol (e.g. RELIANCE)..." 
                        class="w-full bg-gray-900 border border-gray-700 rounded-lg px-4 py-2 text-sm text-white focus:outline-none focus:border-blue-500">
             </div>
+            
+            <!-- SEARCH BY DATE -->
+            <div class="flex items-center gap-2">
+                <span class="text-xs text-gray-400">Date:</span>
+                <input type="text" id="dateInput" placeholder="DD-MM-YYYY" 
+                       class="bg-gray-900 border border-gray-700 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:border-blue-500 w-36">
+            </div>
+
             <div class="flex items-center gap-3">
                 <select id="typeFilter" class="bg-gray-900 border border-gray-700 rounded-lg px-3 py-2 text-sm text-white focus:outline-none">
                     <option value="ALL">All Patterns</option>
@@ -56,18 +60,19 @@
                 <table class="w-full text-left text-sm">
                     <thead class="bg-gray-900/80 text-gray-400 font-semibold uppercase text-xs border-b border-gray-800">
                         <tr>
-                            <th class="px-6 py-4">Date</th>
-                            <th class="px-6 py-4">Symbol</th>
-                            <th class="px-6 py-4">Signal Type</th>
-                            <th class="px-6 py-4">Entry</th>
-                            <th class="px-6 py-4">Stop Loss</th>
-                            <th class="px-6 py-4">Target (3x)</th>
-                            <th class="px-6 py-4">Close</th>
-                            <th class="px-6 py-4 text-center">Interactive Chart</th>
+                            <th class="px-5 py-4">Date</th>
+                            <th class="px-5 py-4">Symbol</th>
+                            <th class="px-5 py-4">Pattern</th>
+                            <th class="px-5 py-4">Entry</th>
+                            <th class="px-5 py-4">Stop Loss</th>
+                            <th class="px-5 py-4">Target (3x)</th>
+                            <th class="px-5 py-4">20 EMA</th>
+                            <th class="px-5 py-4">14 ADX</th>
+                            <th class="px-5 py-4 text-center">Chart</th>
                         </tr>
                     </thead>
                     <tbody id="tableBody" class="divide-y divide-gray-800/60 font-mono">
-                        <tr><td colspan="8" class="text-center py-12 text-gray-500">Loading scanner results...</td></tr>
+                        <tr><td colspan="9" class="text-center py-12 text-gray-500">Loading scanner signals...</td></tr>
                     </tbody>
                 </table>
             </div>
@@ -80,7 +85,7 @@
             <div class="p-4 border-b border-gray-800 flex justify-between items-center bg-gray-900/90">
                 <div>
                     <h3 id="modalTitle" class="text-lg font-bold text-white">NSE: SYMBOL</h3>
-                    <p id="modalSubtitle" class="text-xs text-gray-400">Daily Candlestick View</p>
+                    <p class="text-xs text-gray-400">Daily Candlestick View</p>
                 </div>
                 <button onclick="closeModal()" class="text-gray-400 hover:text-white text-2xl font-bold px-3 py-1">✕</button>
             </div>
@@ -90,11 +95,9 @@
         </div>
     </div>
 
-    <!-- Script Logic -->
     <script>
         let allSignals = [];
 
-        // Load CSV Data
         document.addEventListener('DOMContentLoaded', () => {
             Papa.parse('data/signals.csv', {
                 download: true,
@@ -103,22 +106,25 @@
                 complete: (results) => {
                     allSignals = results.data;
                     renderTable(allSignals);
-                    document.getElementById('signalCount').innerText = `${allSignals.length} Signals Loaded`;
+                    document.getElementById('signalCount').innerText = `${allSignals.length} Signals`;
                 }
             });
 
             document.getElementById('searchInput').addEventListener('input', filterData);
+            document.getElementById('dateInput').addEventListener('input', filterData);
             document.getElementById('typeFilter').addEventListener('change', filterData);
         });
 
         function filterData() {
             const search = document.getElementById('searchInput').value.toUpperCase();
+            const dateSearch = document.getElementById('dateInput').value.trim();
             const type = document.getElementById('typeFilter').value;
 
             const filtered = allSignals.filter(row => {
                 const matchesSymbol = row.symbol ? row.symbol.toUpperCase().includes(search) : false;
+                const matchesDate = !dateSearch || (row.date && row.date.includes(dateSearch));
                 const matchesType = (type === 'ALL') || (row.type === type);
-                return matchesSymbol && matchesType;
+                return matchesSymbol && matchesDate && matchesType;
             });
 
             renderTable(filtered);
@@ -127,7 +133,7 @@
         function renderTable(data) {
             const tbody = document.getElementById('tableBody');
             if (data.length === 0) {
-                tbody.innerHTML = `<tr><td colspan="8" class="text-center py-12 text-gray-500">No signals found matching criteria.</td></tr>`;
+                tbody.innerHTML = `<tr><td colspan="9" class="text-center py-12 text-gray-500">No signals found.</td></tr>`;
                 return;
             }
 
@@ -137,16 +143,17 @@
                 
                 return `
                     <tr class="hover:bg-gray-800/40 transition">
-                        <td class="px-6 py-4 text-gray-300">${row.date || ''}</td>
-                        <td class="px-6 py-4 font-bold text-white">${row.symbol || ''}</td>
-                        <td class="px-6 py-4">
+                        <td class="px-5 py-4 text-gray-300">${row.date || ''}</td>
+                        <td class="px-5 py-4 font-bold text-white">${row.symbol || ''}</td>
+                        <td class="px-5 py-4">
                             <span class="px-2.5 py-1 text-xs border rounded-md font-sans ${badgeStyle}">${row.type || ''}</span>
                         </td>
-                        <td class="px-6 py-4 text-emerald-400">₹${row.entry || ''}</td>
-                        <td class="px-6 py-4 text-rose-400">₹${row.sl || ''}</td>
-                        <td class="px-6 py-4 text-blue-400">₹${row.target || ''}</td>
-                        <td class="px-6 py-4 text-gray-200">₹${row.close || ''}</td>
-                        <td class="px-6 py-4 text-center">
+                        <td class="px-5 py-4 text-emerald-400">₹${row.entry || ''}</td>
+                        <td class="px-5 py-4 text-rose-400">₹${row.sl || ''}</td>
+                        <td class="px-5 py-4 text-blue-400">₹${row.target || ''}</td>
+                        <td class="px-5 py-4 text-gray-300">₹${row.ema || ''}</td>
+                        <td class="px-5 py-4 text-amber-400">${row.adx || ''}</td>
+                        <td class="px-5 py-4 text-center">
                             <button onclick="openTradingView('${row.symbol}')" class="bg-blue-600 hover:bg-blue-500 text-white text-xs px-3 py-1.5 rounded-md transition font-sans">
                                 📈 Chart
                             </button>
@@ -156,7 +163,6 @@
             }).join('');
         }
 
-        // Open External TradingView Widget Modal
         function openTradingView(symbol) {
             document.getElementById('modalTitle').innerText = `NSE:${symbol}`;
             document.getElementById('chartModal').classList.remove('hidden');
