@@ -11,7 +11,7 @@ from datetime import datetime
 DB_PATH = "data/candles.duckdb"
 SIGNALS_CSV = "data/signals.csv"
 
-COMPRESSION_MAX = 0.05   # 5% Compression
+COMPRESSION_MAX = 0.05   # 5% Compression Range
 TARGET_X = 3.0          # Target = Entry + (Entry - SL) * 3.0
 
 EMA_PERIOD = 20
@@ -57,7 +57,9 @@ def calc_adx(df, period=14):
 
 def scan_symbol_exact(symbol, df_sym):
     """
-    Exact scan logic mirroring BOBD_Fixedv3.py
+    PRE-BREAKOUT WATCHLIST ENGINE:
+    Identifies stocks ending today in tight compression (<= 5%) and volume dry-up,
+    providing tomorrow's actionable trigger levels BEFORE the breakout occurs.
     """
     alerts = []
     if df_sym.empty or len(df_sym) < 20:
@@ -76,103 +78,97 @@ def scan_symbol_exact(symbol, df_sym):
     df['EMA20'] = df['Close'].ewm(span=EMA_PERIOD, adjust=False).mean()
     df['ADX'] = calc_adx(df, period=ADX_PERIOD)
 
-    for i in range(len(df) - 1):
-        prev = df.iloc[i]      # Setup Candle i
-        day1 = df.iloc[i + 1]  # Trigger Candle i+1
+    # Scan history candles so the full dashboard archive is populated
+    for i in range(len(df)):
+        candle = df.iloc[i]
 
         try:
-            compression = float(prev['Compression'])
-            volume = float(prev['Volume'])
-            avgvol = float(prev['AvgVol10'])
-            high5 = float(prev['High5'])
-            low5 = float(prev['Low5'])
-            
-            day1_close = float(day1['Close'])
-            day1_ema = float(day1['EMA20'])
-            day1_adx = float(day1['ADX']) if pd.notnull(day1['ADX']) else 0.0
-            
-            setup_date = pd.to_datetime(prev['Date']).strftime("%d-%m-%Y")
-            trigger_date = pd.to_datetime(day1['Date']).strftime("%d-%m-%Y")
+            compression = float(candle['Compression'])
+            volume = float(candle['Volume'])
+            avgvol = float(candle['AvgVol10'])
+            high5 = float(candle['High5'])
+            low5 = float(candle['Low5'])
+            close = float(candle['Close'])
+            ema = float(candle['EMA20'])
+            adx = float(candle['ADX']) if pd.notnull(candle['ADX']) else 0.0
+            setup_date = pd.to_datetime(candle['Date']).strftime("%d-%m-%Y")
         except Exception:
             continue
 
-        # Base Setup Condition (Compression + Volume dry up)
+        # Core Pre-Breakout Setup Condition
         if compression <= COMPRESSION_MAX and volume < avgvol:
 
             # ADX Filter
-            if APPLY_ADX_FILTER and day1_adx < MIN_ADX:
+            if APPLY_ADX_FILTER and adx < MIN_ADX:
                 continue
 
-            # PRE_BREAKOUT
-            if day1_close > high5:
-                if APPLY_EMA_FILTER and (pd.isna(day1_ema) or day1_close < day1_ema):
+            # PRE_BREAKOUT WATCHLIST (Price above/near 20 EMA)
+            if close >= ema:
+                if APPLY_EMA_FILTER and (pd.isna(ema) or close < ema):
                     continue
 
-                entry = round(high5, 2)
-                sl = round(low5, 2)
+                entry = round(high5, 2)   # Trigger Price for Tomorrow
+                sl = round(low5, 2)      # Raw Stop Loss
                 tgt = round(entry + (entry - sl) * TARGET_X, 2)
-                ema_dist = round(abs(day1_close - day1_ema) / day1_ema * 100, 2) if pd.notnull(day1_ema) and day1_ema > 0 else 0.0
+                ema_dist = round(abs(close - ema) / ema * 100, 2) if ema > 0 else 0.0
 
                 alerts.append({
-                    "date": trigger_date,      # Trigger Date for Dashboard & Telegram matching
-                    "setup_date": setup_date,  # Setup Compression Date
+                    "date": setup_date,
                     "symbol": symbol,
                     "timeframe": "D",
                     "type": "PRE_BREAKOUT",
-                    "pattern": "PRE_BREAKOUT", # Web UI compatible key
+                    "pattern": "PRE_BREAKOUT",
                     "entry": entry,
                     "sl": sl,
                     "target": tgt,
-                    "close": round(day1_close, 2),
+                    "close": round(close, 2),
                     "compression": round(compression, 4),
                     "avgvol10": int(avgvol),
-                    "volume": int(day1['Volume']),
-                    "ema": round(day1_ema, 2) if pd.notnull(day1_ema) else 0.0,
+                    "volume": int(volume),
+                    "ema": round(ema, 2),
                     "ema_dist_pct": ema_dist,
-                    "adx": round(day1_adx, 2)
+                    "adx": round(adx, 2)
                 })
 
-            # PRE_BREAKDOWN
-            elif day1_close < low5:
-                if APPLY_EMA_FILTER and (pd.isna(day1_ema) or day1_close > day1_ema):
+            # PRE_BREAKDOWN WATCHLIST (Price below 20 EMA)
+            elif close < ema:
+                if APPLY_EMA_FILTER and (pd.isna(ema) or close > ema):
                     continue
 
-                entry = round(low5, 2)
-                sl = round(high5, 2)
+                entry = round(low5, 2)    # Trigger Price for Tomorrow
+                sl = round(high5, 2)     # Raw Stop Loss
                 tgt = round(entry - (sl - entry) * TARGET_X, 2)
-                ema_dist = round(abs(day1_close - day1_ema) / day1_ema * 100, 2) if pd.notnull(day1_ema) and day1_ema > 0 else 0.0
+                ema_dist = round(abs(close - ema) / ema * 100, 2) if ema > 0 else 0.0
 
                 alerts.append({
-                    "date": trigger_date,      # Trigger Date
-                    "setup_date": setup_date,  # Setup Compression Date
+                    "date": setup_date,
                     "symbol": symbol,
                     "timeframe": "D",
                     "type": "PRE_BREAKDOWN",
-                    "pattern": "PRE_BREAKDOWN", # Web UI compatible key
+                    "pattern": "PRE_BREAKDOWN",
                     "entry": entry,
                     "sl": sl,
                     "target": tgt,
-                    "close": round(day1_close, 2),
+                    "close": round(close, 2),
                     "compression": round(compression, 4),
                     "avgvol10": int(avgvol),
-                    "volume": int(day1['Volume']),
-                    "ema": round(day1_ema, 2) if pd.notnull(day1_ema) else 0.0,
+                    "volume": int(volume),
+                    "ema": round(ema, 2),
                     "ema_dist_pct": ema_dist,
-                    "adx": round(day1_adx, 2)
+                    "adx": round(adx, 2)
                 })
 
     return alerts
 
 
 def send_telegram_alert(signal: dict):
-    """Sends individual alert to Telegram with explicit NSE Chart URL."""
+    """Sends individual pre-breakout alert to Telegram with actionable trigger levels."""
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
         return
 
     symbol = signal["symbol"]
     sig_type = signal["type"]
-    trigger_date = signal["date"]
-    setup_date = signal["setup_date"]
+    setup_date = signal["date"]
     entry = signal["entry"]
     sl = signal["sl"]
     target = signal["target"]
@@ -187,21 +183,20 @@ def send_telegram_alert(signal: dict):
     chart_url = f"https://in.tradingview.com/chart/?symbol=NSE:{symbol}"
 
     message = (
-        f"{emoji} <b>BRAHMASTRA SIGNAL DETECTED</b>\n"
+        f"{emoji} <b>BRAHMASTRA PRE-BREAKOUT WATCHLIST</b>\n"
         f"━━━━━━━━━━━━━━━━━━━━\n"
         f"📈 <b>Stock:</b> {symbol} (NSE F&O)\n"
         f"🎯 <b>Pattern:</b> {sig_type}\n"
-        f"⏱ <b>Timeframe:</b> Daily (1D) | <b>Breakout Date:</b> {trigger_date}\n"
-        f"🔍 <b>Setup Compression Date:</b> {setup_date}\n\n"
-        f"📊 <b>TRADE LEVELS</b>\n"
-        f"• <b>Entry Price :</b> ₹{entry:.2f}\n"
-        f"• <b>Stop Loss   :</b> ₹{sl:.2f}\n"
-        f"• <b>Target (3x) :</b> ₹{target:.2f}\n"
-        f"• <b>Close Price :</b> ₹{close:.2f}\n\n"
-        f"⚡ <b>INDICATORS</b>\n"
-        f"• <b>20 EMA       :</b> ₹{ema:.2f}\n"
-        f"• <b>14 ADX       :</b> {adx:.2f}\n"
-        f"• <b>Volume Ratio :</b> {vol_ratio:.2f}x\n"
+        f"⏱ <b>Timeframe:</b> Daily (1D) | <b>Setup Date:</b> {setup_date}\n\n"
+        f"📊 <b>ACTIONABLE TRIGGER LEVELS FOR TOMORROW</b>\n"
+        f"• <b>Trigger Entry Price :</b> ₹{entry:.2f}\n"
+        f"• <b>Stop Loss           :</b> ₹{sl:.2f}\n"
+        f"• <b>Target (3x)         :</b> ₹{target:.2f}\n"
+        f"• <b>Today's Close       :</b> ₹{close:.2f}\n\n"
+        f"⚡ <b>CONDITIONS PASSED</b>\n"
+        f"• <b>20 EMA              :</b> ₹{ema:.2f}\n"
+        f"• <b>14 ADX              :</b> {adx:.2f}\n"
+        f"• <b>Volume Ratio        :</b> {vol_ratio:.2f}x\n"
         f"━━━━━━━━━━━━━━━━━━━━\n"
         f"📈 <a href='{chart_url}'>View {symbol} TradingView Chart</a>"
     )
@@ -222,9 +217,9 @@ def send_summary_telegram(signal_count: int, date_str: str):
         return
 
     if signal_count > 0:
-        status_text = f"📊 <b>Breakout Signals Triggered Today:</b> {signal_count}"
+        status_text = f"📊 <b>Pre-Breakout Candidates Found Today:</b> {signal_count}"
     else:
-        status_text = f"ℹ️ <b>No Qualified Breakout or Breakdown Stocks Found Today (0 Stocks)</b>"
+        status_text = f"ℹ️ <b>No Qualified Pre-Breakout Stocks Found Today (0 Stocks)</b>"
 
     message = (
         f"🏁 <b>DAILY SCAN COMPLETE ({date_str})</b>\n"
@@ -264,7 +259,7 @@ def run_scanner():
         return
 
     latest_date = pd.to_datetime(df_raw['Date'].max()).strftime("%d-%m-%Y")
-    print(f"🔍 Running Scanner Engine (Market Date: {latest_date})...")
+    print(f"🔍 Running Pre-Breakout Watchlist Engine (Market Date: {latest_date})...")
 
     symbols = df_raw['Symbol'].unique()
     all_signals = []
@@ -283,7 +278,7 @@ def run_scanner():
 
     all_df = pd.DataFrame(all_signals)
 
-    # 3. Identify today's live signals (where trigger_date == latest_date)
+    # 3. Identify today's live pre-breakout candidates (where setup date == latest_date)
     today_signals = all_df[all_df['date'] == latest_date].to_dict('records')
 
     # 4. Prepare export DataFrame for web dashboard
@@ -296,13 +291,13 @@ def run_scanner():
 
     # 5. Dispatch Telegram Alerts
     if today_signals:
-        print(f"📢 Sending {len(today_signals)} alerts for today ({latest_date})...")
+        print(f"📢 Sending {len(today_signals)} pre-breakout alerts for today ({latest_date})...")
         for sig in today_signals:
             send_telegram_alert(sig)
     else:
-        print(f"ℹ️ 0 signals triggered today ({latest_date}).")
+        print(f"ℹ️ 0 pre-breakout candidates found today ({latest_date}).")
 
-    # 6. ALWAYS send final summary message (handles 0 stock days cleanly)
+    # 6. ALWAYS send final summary message
     send_summary_telegram(len(today_signals), latest_date)
 
 
