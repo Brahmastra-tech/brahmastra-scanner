@@ -59,48 +59,13 @@ def calc_rsi(series, period=14):
     return rsi
 
 
-def add_weekly_rsi(df):
-    """Resamples daily data to weekly, calculates 14 RSI, and merges back."""
-    df_temp = df.copy()
-    df_temp['Date_DT'] = pd.to_datetime(df_temp['Date'])
-    df_temp.set_index('Date_DT', inplace=True)
-
-    # Resample to weekly OHLCV
-    weekly = df_temp.resample('W-FRI').agg({
-        'Open': 'first',
-        'High': 'max',
-        'Low': 'min',
-        'Close': 'last',
-        'Volume': 'sum'
-    }).dropna()
-
-    weekly['Weekly_RSI'] = calc_rsi(weekly['Close'], period=14)
-
-    # Merge weekly RSI back into daily candles using backward fill
-    df_temp = pd.merge_asof(
-        df_temp.sort_values('Date_DT'),
-        weekly[['Weekly_RSI']].sort_index(),
-        left_index=True,
-        right_index=True,
-        direction='backward'
-    )
-
-    return df_temp.reset_index(drop=True)
-
-
 def scan_symbol_exact(symbol, df_sym):
     alerts = []
 
-    if df_sym.empty or len(df_sym) < 30:
+    if df_sym.empty or len(df_sym) < 25:
         return alerts
 
     df = df_sym.copy().sort_values("Date").reset_index(drop=True)
-
-    # Compute Weekly RSI
-    try:
-        df = add_weekly_rsi(df)
-    except Exception:
-        df['Weekly_RSI'] = np.nan
 
     # -------------------------
     # BOBD BASE CALCULATIONS
@@ -125,6 +90,7 @@ def scan_symbol_exact(symbol, df_sym):
     )
 
     df["ADX"] = calc_adx(df, 14)
+    df["RSI"] = calc_rsi(df["Close"], 14)
 
     seen = set()
 
@@ -155,7 +121,7 @@ def scan_symbol_exact(symbol, df_sym):
         ):
             continue
 
-        weekly_rsi = float(row["Weekly_RSI"]) if pd.notna(row.get("Weekly_RSI")) else 50.0
+        daily_rsi = float(row["RSI"]) if pd.notna(row["RSI"]) else 50.0
 
         # -----------------------------
         # BULLISH PRE-BREAKOUT
@@ -163,8 +129,8 @@ def scan_symbol_exact(symbol, df_sym):
 
         if row["Close"] > row["EMA20"]:
 
-            # Filter: Weekly RSI MUST be > 50
-            if weekly_rsi <= 50.0:
+            # Filter: Daily RSI MUST be > 52 for bullish momentum
+            if daily_rsi <= 52.0:
                 continue
 
             key = (symbol, "PRE_BREAKOUT")
@@ -230,8 +196,8 @@ def scan_symbol_exact(symbol, df_sym):
                     "ADX":
                         round(row["ADX"], 2),
 
-                    "Weekly_RSI":
-                        round(weekly_rsi, 2)
+                    "RSI":
+                        round(daily_rsi, 2)
 
                 })
 
@@ -241,8 +207,8 @@ def scan_symbol_exact(symbol, df_sym):
 
         elif row["Close"] < row["EMA20"]:
 
-            # Filter: Weekly RSI MUST be < 45
-            if weekly_rsi >= 45.0:
+            # Filter: Daily RSI MUST be < 48 for bearish momentum
+            if daily_rsi >= 48.0:
                 continue
 
             key = (symbol, "PRE_BREAKDOWN")
@@ -309,8 +275,8 @@ def scan_symbol_exact(symbol, df_sym):
                     "ADX":
                         round(row["ADX"], 2),
 
-                    "Weekly_RSI":
-                        round(weekly_rsi, 2)
+                    "RSI":
+                        round(daily_rsi, 2)
 
                 })
 
@@ -335,7 +301,7 @@ def send_telegram_alert(signal: dict):
     vol_ratio = round(volume / avgvol, 2) if avgvol > 0 else 1.0
     ema = signal.get("EMA") or signal.get("ema")
     adx = signal.get("ADX") or signal.get("adx")
-    weekly_rsi = signal.get("Weekly_RSI") or signal.get("weekly_rsi", "N/A")
+    rsi = signal.get("RSI") or signal.get("rsi", "N/A")
 
     emoji = "🚀" if sig_type == "PRE_BREAKOUT" else "📉"
     chart_url = f"https://in.tradingview.com/chart/?symbol=NSE:{symbol}"
@@ -351,8 +317,8 @@ def send_telegram_alert(signal: dict):
         f"• <b>Stop Loss           :</b> ₹{sl:.2f}\n"
         f"• <b>Target (3x)         :</b> ₹{target:.2f}\n"
         f"• <b>Today's Close       :</b> ₹{close:.2f}\n\n"
-        f"⚡ <b>MACRO CONVICTION METRICS</b>\n"
-        f"• <b>Weekly RSI          :</b> {weekly_rsi}\n"
+        f"⚡ <b>CONDITIONS MET</b>\n"
+        f"• <b>14 RSI              :</b> {rsi}\n"
         f"• <b>20 EMA              :</b> ₹{ema:.2f}\n"
         f"• <b>14 ADX              :</b> {adx:.2f}\n"
         f"• <b>Volume Ratio        :</b> {vol_ratio:.2f}x\n"
@@ -378,7 +344,7 @@ def send_telegram_alert(signal: dict):
 
 
 def send_summary_telegram(signals_today: list, date_str: str):
-    """Sends scan execution summary to Telegram breaking down Long & Short counts."""
+    """Sends scan execution summary to Telegram."""
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
         print("⚠️ Telegram credentials missing. Skipping summary dispatch.")
         return
@@ -391,8 +357,8 @@ def send_summary_telegram(signals_today: list, date_str: str):
         f"🏁 <b>DAILY SCAN COMPLETE ({date_str})</b>\n"
         f"━━━━━━━━━━━━━━━━━━━━\n"
         f"📊 <b>Total Candidates Found Today:</b> {total_count}\n"
-        f"🚀 <b>Pre-Breakout (Long | W-RSI > 50)  :</b> {len(breakouts)}\n"
-        f"📉 <b>Pre-Breakdown (Short | W-RSI < 45) :</b> {len(breakdowns)}\n\n"
+        f"🚀 <b>Pre-Breakout (Long | RSI > 52)   :</b> {len(breakouts)}\n"
+        f"📉 <b>Pre-Breakdown (Short | RSI < 48)  :</b> {len(breakdowns)}\n\n"
         f"🌐 <b>Interactive Web Dashboard & Full History:</b>\n"
         f"👉 <a href='{DASHBOARD_URL}'>{DASHBOARD_URL}</a>\n"
         f"━━━━━━━━━━━━━━━━━━━━"
@@ -416,7 +382,7 @@ def send_summary_telegram(signals_today: list, date_str: str):
 
 
 def run_scanner():
-    print("🚀 Initializing Scanner Engine with Weekly RSI Filter...")
+    print("🚀 Initializing Scanner Engine with Daily RSI Filter...")
     print(f"🔑 Telegram Secret Status: Bot Token={'FOUND' if TELEGRAM_BOT_TOKEN else 'MISSING'}, Chat ID={'FOUND' if TELEGRAM_CHAT_ID else 'MISSING'}")
 
     if not os.path.exists(DB_PATH):
@@ -451,7 +417,7 @@ def run_scanner():
 
     if not all_signals:
         print("ℹ️ No signals matched conditions overall.")
-        pd.DataFrame(columns=['Date', 'Symbol', 'Timeframe', 'Type', 'Entry', 'SL', 'Target', 'Close', 'Compression', 'AvgVol10', 'Volume', 'EMA', 'EMA_Dist%', 'ADX', 'Weekly_RSI']).to_csv(SIGNALS_CSV, index=False)
+        pd.DataFrame(columns=['Date', 'Symbol', 'Timeframe', 'Type', 'Entry', 'SL', 'Target', 'Close', 'Compression', 'AvgVol10', 'Volume', 'EMA', 'EMA_Dist%', 'ADX', 'RSI']).to_csv(SIGNALS_CSV, index=False)
         send_summary_telegram([], latest_date)
         return
 
