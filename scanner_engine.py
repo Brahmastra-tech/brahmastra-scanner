@@ -6,14 +6,14 @@ import requests
 from datetime import datetime
 
 # ==========================================
-# CONFIGURATION (STRICT INSTITUTIONAL FILTERS)
+# CONFIGURATION (STRICT HIGH-CONVICTION)
 # ==========================================
 DB_PATH = "data/candles.duckdb"
 SIGNALS_CSV = "data/signals.csv"
 
 COMPRESSION_MAX = 0.05       # 5% Max Compression Range
-PROXIMITY_MAX_PCT = 0.015    # Must be within 1.5% of Trigger Level
-MIN_DELIVERY_PCT = 40.0      # Minimum 40% Delivery Percentage required
+PROXIMITY_MAX_PCT = 0.012    # Tight 1.2% Proximity to Breakout/Breakdown Trigger
+MIN_DELIVERY_PCT = 40.0      # Minimum 40% Delivery Percentage (if available)
 TARGET_X = 3.0              # 3x Target
 
 EMA_PERIOD = 20
@@ -85,18 +85,18 @@ def scan_symbol_exact(symbol, df_sym):
             ema = float(candle['EMA20'])
             adx = float(candle['ADX']) if pd.notnull(candle['ADX']) else 0.0
             
-            # Extract Delivery % if present in DuckDB table
-            deliv_pct = float(candle.get('DeliveryPct', 100.0)) if 'DeliveryPct' in candle else 100.0
+            # Extract Delivery % if available
+            deliv_pct = float(candle['DeliveryPct']) if 'DeliveryPct' in candle and pd.notnull(candle['DeliveryPct']) else None
             
             setup_date = pd.to_datetime(candle['Date']).strftime("%d-%m-%Y")
         except Exception:
             continue
 
-        # 1. Compression + Volume Dry up
+        # 1. Base Setup (Compression + Vol < AvgVol)
         if compression <= COMPRESSION_MAX and volume < avgvol:
 
-            # 2. Delivery Percentage Filter (Must be >= 40%)
-            if deliv_pct < MIN_DELIVERY_PCT:
+            # 2. Strict Delivery % Filter (if delivery column exists in DB)
+            if deliv_pct is not None and deliv_pct < MIN_DELIVERY_PCT:
                 continue
 
             # 3. ADX Filter
@@ -108,7 +108,7 @@ def scan_symbol_exact(symbol, df_sym):
                 if APPLY_EMA_FILTER and (pd.isna(ema) or close < ema):
                     continue
 
-                # Proximity Filter (Within 1.5% of High5)
+                # Tight Proximity Filter (Within 1.2% of High5)
                 dist_to_trigger = (high5 - close) / close
                 if dist_to_trigger > PROXIMITY_MAX_PCT:
                     continue
@@ -131,7 +131,7 @@ def scan_symbol_exact(symbol, df_sym):
                     "compression": round(compression, 4),
                     "avgvol10": int(avgvol),
                     "volume": int(volume),
-                    "deliv_pct": round(deliv_pct, 2),
+                    "deliv_pct": round(deliv_pct, 2) if deliv_pct is not None else 0.0,
                     "ema": round(ema, 2),
                     "ema_dist_pct": ema_dist,
                     "adx": round(adx, 2)
@@ -142,7 +142,7 @@ def scan_symbol_exact(symbol, df_sym):
                 if APPLY_EMA_FILTER and (pd.isna(ema) or close > ema):
                     continue
 
-                # Proximity Filter (Within 1.5% of Low5)
+                # Tight Proximity Filter (Within 1.2% of Low5)
                 dist_to_trigger = (close - low5) / close
                 if dist_to_trigger > PROXIMITY_MAX_PCT:
                     continue
@@ -165,7 +165,7 @@ def scan_symbol_exact(symbol, df_sym):
                     "compression": round(compression, 4),
                     "avgvol10": int(avgvol),
                     "volume": int(volume),
-                    "deliv_pct": round(deliv_pct, 2),
+                    "deliv_pct": round(deliv_pct, 2) if deliv_pct is not None else 0.0,
                     "ema": round(ema, 2),
                     "ema_dist_pct": ema_dist,
                     "adx": round(adx, 2)
@@ -192,6 +192,8 @@ def send_telegram_alert(signal: dict):
     emoji = "🚀" if sig_type == "PRE_BREAKOUT" else "📉"
     chart_url = f"https://in.tradingview.com/chart/?symbol=NSE:{symbol}"
 
+    deliv_str = f"• <b>Delivery %          :</b> {deliv_pct:.1f}%\n" if deliv_pct > 0 else ""
+
     message = (
         f"{emoji} <b>BRAHMASTRA PRE-BREAKOUT WATCHLIST</b>\n"
         f"━━━━━━━━━━━━━━━━━━━━\n"
@@ -204,7 +206,7 @@ def send_telegram_alert(signal: dict):
         f"• <b>Target (3x)         :</b> ₹{target:.2f}\n"
         f"• <b>Today's Close       :</b> ₹{close:.2f}\n\n"
         f"⚡ <b>CONVICTION METRICS</b>\n"
-        f"• <b>Delivery %          :</b> {deliv_pct:.1f}%\n"
+        f"{deliv_str}"
         f"• <b>20 EMA              :</b> ₹{ema:.2f}\n"
         f"• <b>14 ADX              :</b> {adx:.2f}\n"
         f"━━━━━━━━━━━━━━━━━━━━\n"
@@ -226,9 +228,9 @@ def send_summary_telegram(signal_count: int, date_str: str):
         return
 
     status_text = (
-        f"📊 <b>High-Delivery Pre-Breakout Candidates Today:</b> {signal_count}"
+        f"📊 <b>High-Conviction Pre-Breakout Candidates Today:</b> {signal_count}"
         if signal_count > 0 else
-        f"ℹ️ <b>No Qualified High-Delivery Stocks Found Today (0 Stocks)</b>"
+        f"ℹ️ <b>No Qualified High-Conviction Stocks Found Today (0 Stocks)</b>"
     )
 
     message = (
@@ -256,7 +258,6 @@ def run_scanner():
 
     conn = duckdb.connect(DB_PATH)
     
-    # Ingest delivery columns if present in schema
     try:
         df_raw = conn.execute("""
             SELECT symbol AS Symbol, CAST(timestamp AS DATE) AS Date, open AS Open, high AS High, low AS Low, close AS Close, volume AS Volume,
