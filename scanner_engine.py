@@ -6,7 +6,7 @@ import requests
 from datetime import datetime
 
 # ==========================================
-# CONFIGURATION (100% BOBD GUI PARITY)
+# CONFIGURATION
 # ==========================================
 DB_PATH = "data/candles.duckdb"
 SIGNALS_CSV = "data/signals.csv"
@@ -57,7 +57,8 @@ def calc_adx(df, period=14):
 
 def scan_symbol_exact(symbol, df_sym):
     """
-    Exact scan logic mirroring BOBD_Fixedv3.py (abv.csv format)
+    Exact scan logic mirroring BOBD_Fixedv3.py logic:
+    - Primary Date is the Trigger Date (Candle i+1 Breakout)
     """
     alerts = []
     if df_sym.empty or len(df_sym) < 20:
@@ -114,12 +115,12 @@ def scan_symbol_exact(symbol, df_sym):
                 ema_dist = round(abs(day1_close - day1_ema) / day1_ema * 100, 2) if pd.notnull(day1_ema) and day1_ema > 0 else 0.0
 
                 alerts.append({
-                    "date": setup_date,
-                    "trigger_date": trigger_date,
+                    "date": trigger_date,      # Breakout Date
+                    "setup_date": setup_date,  # Compression Date
                     "symbol": symbol,
                     "timeframe": "D",
                     "type": "PRE_BREAKOUT",
-                    "pattern": "PRE_BREAKOUT",
+                    "pattern": "PRE_BREAKOUT", # Required by index.html
                     "entry": entry,
                     "sl": sl,
                     "target": tgt,
@@ -143,12 +144,12 @@ def scan_symbol_exact(symbol, df_sym):
                 ema_dist = round(abs(day1_close - day1_ema) / day1_ema * 100, 2) if pd.notnull(day1_ema) and day1_ema > 0 else 0.0
 
                 alerts.append({
-                    "date": setup_date,
-                    "trigger_date": trigger_date,
+                    "date": trigger_date,      # Breakdown Date
+                    "setup_date": setup_date,  # Compression Date
                     "symbol": symbol,
                     "timeframe": "D",
                     "type": "PRE_BREAKDOWN",
-                    "pattern": "PRE_BREAKDOWN",
+                    "pattern": "PRE_BREAKDOWN", # Required by index.html
                     "entry": entry,
                     "sl": sl,
                     "target": tgt,
@@ -171,8 +172,8 @@ def send_telegram_alert(signal: dict):
 
     symbol = signal["symbol"]
     sig_type = signal["type"]
-    setup_date = signal["date"]
-    trigger_date = signal["trigger_date"]
+    trigger_date = signal["date"]
+    setup_date = signal["setup_date"]
     entry = signal["entry"]
     sl = signal["sl"]
     target = signal["target"]
@@ -277,17 +278,16 @@ def run_scanner():
 
     all_df = pd.DataFrame(all_signals)
 
-    # 3. Identify today's live signals (where trigger_date == latest_date)
-    today_signals = all_df[all_df['trigger_date'] == latest_date].to_dict('records')
+    # 3. Identify today's live signals (where date == latest_date)
+    today_signals = all_df[all_df['date'] == latest_date].to_dict('records')
 
     # 4. Prepare export DataFrame for web dashboard
-    export_df = all_df.drop(columns=['trigger_date'])
-    export_df['Date_DT'] = pd.to_datetime(export_df['date'], format="%d-%m-%Y")
-    export_df = export_df.sort_values('Date_DT', ascending=False).drop(columns=['Date_DT'])
+    all_df['Date_DT'] = pd.to_datetime(all_df['date'], format="%d-%m-%Y")
+    export_df = all_df.sort_values('Date_DT', ascending=False).drop(columns=['Date_DT'])
 
     os.makedirs("data", exist_ok=True)
     export_df.to_csv(SIGNALS_CSV, index=False)
-    print(f"✅ Saved {len(export_df)} signals with web-compatible headers to {SIGNALS_CSV}.")
+    print(f"✅ Saved {len(export_df)} signals with web dashboard compatible headers to {SIGNALS_CSV}.")
 
     # 5. Dispatch Telegram Alerts
     if today_signals:
