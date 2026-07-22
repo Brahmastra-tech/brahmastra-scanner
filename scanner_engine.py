@@ -1,4 +1,5 @@
 import os
+import time
 import duckdb
 import pandas as pd
 import numpy as np
@@ -341,7 +342,7 @@ def send_telegram_alert(signal: dict):
 
 
 def send_summary_telegram(signals_today: list, date_str: str):
-    """Sends scan execution summary to Telegram with Long & Short breakdowns."""
+    """Sends scan summary to Telegram without HTML unescaped character bugs."""
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
         print("⚠️ Telegram credentials missing. Skipping summary dispatch.")
         return
@@ -350,14 +351,15 @@ def send_summary_telegram(signals_today: list, date_str: str):
     breakdowns = [s for s in signals_today if s.get("Type") == "PRE_BREAKDOWN"]
     total_count = len(signals_today)
 
+    # Note: Removed raw '<' and '>' characters to prevent Telegram HTML parse errors
     message = (
         f"🏁 <b>DAILY SCAN COMPLETE ({date_str})</b>\n"
         f"━━━━━━━━━━━━━━━━━━━━\n"
         f"📊 <b>Total Candidates Found Today:</b> {total_count}\n"
-        f"🚀 <b>Pre-Breakout (Long | RSI > 52)   :</b> {len(breakouts)}\n"
-        f"📉 <b>Pre-Breakdown (Short | RSI < 48)  :</b> {len(breakdowns)}\n\n"
+        f"🚀 <b>Pre-Breakout (Long | RSI above 52)   :</b> {len(breakouts)}\n"
+        f"📉 <b>Pre-Breakdown (Short | RSI below 48)  :</b> {len(breakdowns)}\n\n"
         f"🌐 <b>Interactive Web Dashboard & Full History:</b>\n"
-        f"{DASHBOARD_URL}\n"
+        f"👉 <a href='{DASHBOARD_URL}'>{DASHBOARD_URL}</a>\n"
         f"━━━━━━━━━━━━━━━━━━━━"
     )
 
@@ -403,7 +405,7 @@ def run_scanner():
     symbols = df_raw['Symbol'].unique()
     all_signals = []
 
-    # 1. Gather all historical signals
+    # 1. Collect historical signals
     for sym in symbols:
         df_sym = df_raw[df_raw['Symbol'] == sym]
         alerts = scan_symbol_exact(sym, df_sym)
@@ -418,7 +420,7 @@ def run_scanner():
         send_summary_telegram([], latest_date)
         return
 
-    # 2. Export full history dataset to CSV
+    # 2. Export full backtest history dataset to CSV
     all_df = pd.DataFrame(all_signals)
     date_col = "Date" if "Date" in all_df.columns else "date"
     all_df["Date_DT"] = pd.to_datetime(all_df[date_col], format="%d-%m-%Y")
@@ -431,12 +433,14 @@ def run_scanner():
     today_signals = export_df[export_df[date_col] == latest_date].to_dict('records')
     print(f"📊 Candidates for Today ({latest_date}): {len(today_signals)}")
 
-    # 4. Dispatch individual alerts
-    for sig in today_signals:
-        send_telegram_alert(sig)
-
-    # 5. Dispatch daily summary card with dashboard link
-    send_summary_telegram(today_signals, latest_date)
+    # 4. Dispatch individual alerts with 0.5s throttling to prevent API limits
+    try:
+        for sig in today_signals:
+            send_telegram_alert(sig)
+            time.sleep(0.5)
+    finally:
+        # 5. Guaranteed summary message dispatch
+        send_summary_telegram(today_signals, latest_date)
 
 
 if __name__ == "__main__":
