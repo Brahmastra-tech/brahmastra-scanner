@@ -1,6 +1,7 @@
 import os
 import duckdb
-import polars as pl
+import pandas as pd
+import numpy as np
 import requests
 from datetime import datetime
 
@@ -9,8 +10,11 @@ from datetime import datetime
 # ==========================================
 DB_PATH = "data/candles.duckdb"
 SIGNALS_CSV = "data/signals.csv"
-TARGET_X = 3.0       # Target multiplier (3x Risk)
-MAX_SL_PCT = 0.015   # 1.5% Max Stop Loss Cap (Adjustable)
+
+TARGET_X = 3.0          # Target = SL * 3.0
+MAX_SL_PCT = 0.015      # 1.5% Max Stop Loss Cap
+COMPRESSION_MAX = 0.05
+
 EMA_PERIOD = 20
 ADX_PERIOD = 14
 MIN_ADX = 20.0
@@ -20,21 +24,143 @@ TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 DASHBOARD_URL = "https://brahmastra-tech.github.io/brahmastra-scanner/"
 
 
+def calc_adx(df, period=14):
+    """Exact ADX calculation aligned with BOBD_Fixedv3.py."""
+    if df is None or len(df) < period + 2:
+        return pd.Series([np.nan] * len(df), index=df.index)
+
+    high = df['High']
+    low = df['Low']
+    close = df['Close']
+
+    plus_dm = high.diff()
+    minus_dm = -low.diff()
+
+    plus_dm = plus_dm.where((plus_dm > minus_dm) & (plus_dm > 0), 0.0)
+    minus_dm = minus_dm.where((minus_dm > plus_dm) & (minus_dm > 0), 0.0)
+
+    tr1 = high - low
+    tr2 = (high - close.shift()).abs()
+    tr3 = (low - close.shift()).abs()
+    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+
+    atr = tr.rolling(period).mean()
+
+    plus_di = 100 * (plus_dm.rolling(period).sum() / atr)
+    minus_di = 100 * (minus_dm.rolling(period).sum() / atr)
+
+    dx = (abs(plus_di - minus_di) / (plus_di + minus_di)) * 100
+    adx = dx.rolling(period).mean()
+    return adx
+
+
+def scan_symbol_exact(symbol, df_sym):
+    """
+    Exact scan logic derived from BOBD_Fixedv3.py
+    Enforces setup on candle i, breakout on candle i+1, plus mandatory EMA/ADX filters.
+    """
+    alerts = []
+    if df_sym.empty or len(df_sym) < 20:
+        return alerts
+
+    df = df_sym.copy().sort_values("Date").reset_index(drop=True)
+    
+    # Rolling metrics
+    df['High5'] = df['High'].rolling(5).max()
+    df['Low5'] = df['Low'].rolling(5).min()
+    df['AvgVol10'] = df['Volume'].rolling(10).mean()
+    df['PrevClose'] = df['Close'].shift(1)
+    df['Compression'] = (df['High5'] - df['Low5']) / df['PrevClose']
+    
+    # Mandatory Indicators
+    df['EMA20'] = df['Close'].ewm(span=EMA_PERIOD, adjust=False).mean()
+    df['ADX'] = calc_adx(df, period=ADX_PERIOD)
+
+    # Iterate through candle history
+    for i in range(len(df) - 1):
+        prev = df.iloc[i]      # Setup Candle (Candle i)
+        day1 = df.iloc[i + 1]  # Trigger Candle (Candle i+1)
+
+        try:
+            compression = float(prev['Compression'])
+            volume = float(prev['Volume'])
+            avgvol = float(prev['AvgVol10'])
+            high5 = float(prev['High5'])
+            low5 = float(prev['Low5'])
+            
+            day1_close = float(day1['Close'])
+            day1_ema = float(day1['EMA20'])
+            day1_adx = float(day1['ADX']) if pd.notnull(day1['ADX']) else 0.0
+            trigger_date = pd.to_datetime(day1['Date']).strftime("%d-%m-%Y")
+        except Exception:
+            continue
+
+        # 1. Base Setup Condition on Setup Candle
+        if compression <= COMPRESSION_MAX and volume < avgvol:
+            
+            # MANDATORY EMA & ADX FILTERS
+            if day1_adx < MIN_ADX or pd.isna(day1_ema):
+                continue
+
+            # 2. PRE_BREAKOUT Trigger (Close > Prev High5 AND Close > EMA20)
+            if day1_close > high5 and day1_close > day1_ema:
+                entry = round(high5, 2)
+                # Tighter SL option: MAX of Low5 or 1.5% max risk
+                sl = round(max(low5, entry * (1 - MAX_SL_PCT)), 2)
+                tgt = round(entry + (entry - sl) * TARGET_X, 2)
+
+                alerts.append({
+                    "Date": trigger_date,
+                    "Symbol": symbol,
+                    "Type": "PRE_BREAKOUT",
+                    "Entry": entry,
+                    "SL": sl,
+                    "Target": tgt,
+                    "Close": round(day1_close, 2),
+                    "EMA": round(day1_ema, 2),
+                    "ADX": round(day1_adx, 2),
+                    "Compression": round(compression, 4),
+                    "VolRatio": round(float(day1['Volume']) / avgvol, 2) if avgvol > 0 else 1.0
+                })
+
+            # 3. PRE_BREAKDOWN Trigger (Close < Prev Low5 AND Close < EMA20)
+            elif day1_close < low5 and day1_close < day1_ema:
+                entry = round(low5, 2)
+                sl = round(min(high5, entry * (1 + MAX_SL_PCT)), 2)
+                tgt = round(entry - (sl - entry) * TARGET_X, 2)
+
+                alerts.append({
+                    "Date": trigger_date,
+                    "Symbol": symbol,
+                    "Type": "PRE_BREAKDOWN",
+                    "Entry": entry,
+                    "SL": sl,
+                    "Target": tgt,
+                    "Close": round(day1_close, 2),
+                    "EMA": round(day1_ema, 2),
+                    "ADX": round(day1_adx, 2),
+                    "Compression": round(compression, 4),
+                    "VolRatio": round(float(day1['Volume']) / avgvol, 2) if avgvol > 0 else 1.0
+                })
+
+    return alerts
+
+
 def send_telegram_alert(signal: dict):
-    """Sends individual formatted alert to Telegram."""
+    """Sends individual alert to Telegram."""
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
         return
 
-    symbol = signal["symbol"]
-    sig_type = signal["type"]
-    date_str = signal["date"]
-    entry = signal["entry"]
-    sl = signal["sl"]
-    target = signal["target"]
-    close = signal["close"]
-    vol_ratio = signal["vol_ratio"]
-    ema = signal["ema"]
-    adx = signal["adx"]
+    symbol = signal["Symbol"]
+    sig_type = signal["Type"]
+    date_str = signal["Date"]
+    entry = signal["Entry"]
+    sl = signal["SL"]
+    target = signal["Target"]
+    close = signal["Close"]
+    vol_ratio = signal["VolRatio"]
+    ema = signal["EMA"]
+    adx = signal["ADX"]
 
     emoji = "🚀" if sig_type == "PRE_BREAKOUT" else "📉"
     
@@ -43,16 +169,16 @@ def send_telegram_alert(signal: dict):
         f"━━━━━━━━━━━━━━━━━━━━\n"
         f"📈 <b>Stock:</b> {symbol} (NSE F&O)\n"
         f"🎯 <b>Pattern:</b> {sig_type}\n"
-        f"⏱ <b>Timeframe:</b> Daily (1D) | <b>Date:</b> {date_str}\n\n"
-        f"📊 <b>TRADE LEVELS (Tighter SL)</b>\n"
+        f"⏱ <b>Timeframe:</b> Daily (1D) | <b>Trigger Date:</b> {date_str}\n\n"
+        f"📊 <b>TRADE LEVELS</b>\n"
         f"• <b>Entry Price :</b> ₹{entry:.2f}\n"
-        f"• <b>Stop Loss   :</b> ₹{sl:.2f} (Risk Cap)\n"
+        f"• <b>Stop Loss   :</b> ₹{sl:.2f}\n"
         f"• <b>Target (3x) :</b> ₹{target:.2f}\n"
         f"• <b>Close Price :</b> ₹{close:.2f}\n\n"
-        f"⚡ <b>CONFIRMATION INDICATORS</b>\n"
-        f"• <b>Volume Ratio :</b> {vol_ratio:.2f}x (vs 10 MA)\n"
+        f"⚡ <b>MANDATORY FILTERS PASSED</b>\n"
         f"• <b>20 EMA       :</b> ₹{ema:.2f}\n"
-        f"• <b>14 ADX       :</b> {adx:.2f}\n"
+        f"• <b>14 ADX       :</b> {adx:.2f} (≥ 20.0)\n"
+        f"• <b>Volume Ratio :</b> {vol_ratio:.2f}x\n"
         f"━━━━━━━━━━━━━━━━━━━━\n"
         f"📈 <a href='https://in.tradingview.com/chart/?symbol=NSE:{symbol}'>View TradingView Chart</a>"
     )
@@ -68,14 +194,14 @@ def send_telegram_alert(signal: dict):
 
 
 def send_summary_telegram(signal_count: int, date_str: str):
-    """Sends a summary message containing the Backtest / Web Dashboard link after all alerts."""
+    """Sends summary web dashboard link after alerts."""
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
         return
 
     message = (
         f"🏁 <b>DAILY SCAN COMPLETE ({date_str})</b>\n"
         f"━━━━━━━━━━━━━━━━━━━━\n"
-        f"📊 <b>Total High-Probability Signals:</b> {signal_count}\n\n"
+        f"📊 <b>High-Conviction Signals Found:</b> {signal_count}\n\n"
         f"🌐 <b>Historical Backtest Terminal & Interactive Dashboard:</b>\n"
         f"👉 <a href='{DASHBOARD_URL}'>{DASHBOARD_URL}</a>\n"
         f"━━━━━━━━━━━━━━━━━━━━"
@@ -91,45 +217,6 @@ def send_summary_telegram(signal_count: int, date_str: str):
     requests.post(url, json=payload, timeout=10)
 
 
-def calculate_adx_polars(df: pl.DataFrame, period: int = 14) -> pl.DataFrame:
-    df = df.with_columns([
-        (pl.col("high") - pl.col("high").shift(1)).alias("up_move"),
-        (pl.col("low").shift(1) - pl.col("low")).alias("down_move"),
-        (pl.col("high") - pl.col("low")).alias("tr1"),
-        (pl.col("high") - pl.col("close").shift(1)).abs().alias("tr2"),
-        (pl.col("low") - pl.col("close").shift(1)).abs().alias("tr3")
-    ])
-
-    df = df.with_columns([
-        pl.max_horizontal(["tr1", "tr2", "tr3"]).alias("tr"),
-        pl.when((pl.col("up_move") > pl.col("down_move")) & (pl.col("up_move") > 0))
-          .then(pl.col("up_move"))
-          .otherwise(0.0).alias("plus_dm"),
-        pl.when((pl.col("down_move") > pl.col("up_move")) & (pl.col("down_move") > 0))
-          .then(pl.col("down_move"))
-          .otherwise(0.0).alias("minus_dm")
-    ])
-
-    df = df.with_columns([
-        pl.col("tr").rolling_mean(window_size=period).over("symbol").alias("atr"),
-        pl.col("plus_dm").rolling_mean(window_size=period).over("symbol").alias("smooth_plus_dm"),
-        pl.col("minus_dm").rolling_mean(window_size=period).over("symbol").alias("smooth_minus_dm")
-    ])
-
-    df = df.with_columns([
-        (100 * pl.col("smooth_plus_dm") / pl.col("atr")).alias("plus_di"),
-        (100 * pl.col("smooth_minus_dm") / pl.col("atr")).alias("minus_di")
-    ])
-
-    df = df.with_columns([
-        (100 * (pl.col("plus_di") - pl.col("minus_di")).abs() / (pl.col("plus_di") + pl.col("minus_di"))).alias("dx")
-    ])
-
-    return df.with_columns([
-        pl.col("dx").rolling_mean(window_size=period).over("symbol").alias("adx")
-    ])
-
-
 def run_scanner():
     if not os.path.exists(DB_PATH):
         print("❌ Database file not found!")
@@ -137,109 +224,65 @@ def run_scanner():
 
     conn = duckdb.connect(DB_PATH)
     
-    df = conn.execute("""
-        SELECT symbol, timeframe, timestamp AS datetime_val, open, high, low, close, volume
+    # 1. Fetch candles from DuckDB
+    df_raw = conn.execute("""
+        SELECT symbol AS Symbol, CAST(timestamp AS DATE) AS Date, open AS Open, high AS High, low AS Low, close AS Close, volume AS Volume
         FROM ohlcv_candles
         ORDER BY symbol, timestamp ASC
-    """).pl()
+    """).df()
 
-    if df.is_empty():
+    if df_raw.empty:
+        print("⚠️ No candles available in DuckDB.")
         return
 
-    latest_date_dt = df.select(pl.max("datetime_val")).item()
-    latest_date_str = latest_date_dt.strftime("%d-%m-%Y")
+    latest_date = pd.to_datetime(df_raw['Date'].max()).strftime("%d-%m-%Y")
+    print(f"🔍 Running Exact Scanner Core (Latest Market Date: {latest_date})...")
 
-    df = df.with_columns([
-        pl.col("close").ewm_mean(span=EMA_PERIOD, adjust=False).over("symbol").alias("ema20")
-    ])
-    df = calculate_adx_polars(df, period=ADX_PERIOD)
+    symbols = df_raw['Symbol'].unique()
+    all_signals = []
 
-    df_metrics = df.with_columns([
-        pl.col("high").rolling_max(window_size=5).over("symbol").alias("High5"),
-        pl.col("low").rolling_min(window_size=5).over("symbol").alias("Low5"),
-        pl.col("volume").rolling_mean(window_size=10).over("symbol").alias("AvgVol10"),
-        pl.col("close").shift(1).over("symbol").alias("PrevClose")
-    ]).with_columns([
-        ((pl.col("High5") - pl.col("Low5")) / pl.col("PrevClose")).alias("Compression")
-    ])
+    # 2. Iterate per symbol to ensure 100% exact technical calculation
+    for sym in symbols:
+        df_sym = df_raw[df_raw['Symbol'] == sym]
+        alerts = scan_symbol_exact(sym, df_sym)
+        if alerts:
+            all_signals.extend(alerts)
 
-    df_shifted = df_metrics.with_columns([
-        pl.col("Compression").shift(1).over("symbol").alias("PrevCompression"),
-        pl.col("volume").shift(1).over("symbol").alias("PrevVolume"),
-        pl.col("AvgVol10").shift(1).over("symbol").alias("PrevAvgVol10"),
-        pl.col("High5").shift(1).over("symbol").alias("PrevHigh5"),
-        pl.col("Low5").shift(1).over("symbol").alias("PrevLow5")
-    ])
-
-    valid_setup = (pl.col("PrevCompression") <= 0.05) & (pl.col("PrevVolume") < pl.col("PrevAvgVol10"))
-
-    # Tighter SL Logic Applied (capped at MAX_SL_PCT or PrevLow5, whichever is tighter)
-    breakouts = df_shifted.filter(
-        valid_setup & 
-        (pl.col("close") > pl.col("PrevHigh5")) & 
-        (pl.col("close") > pl.col("ema20")) & 
-        (pl.col("adx") >= MIN_ADX)
-    ).with_columns([
-        pl.lit("PRE_BREAKOUT").alias("type"),
-        pl.col("PrevHigh5").alias("entry"),
-        pl.max_horizontal([pl.col("PrevLow5"), pl.col("PrevHigh5") * (1 - MAX_SL_PCT)]).alias("sl")
-    ]).with_columns([
-        (pl.col("entry") + (pl.col("entry") - pl.col("sl")) * TARGET_X).alias("target")
-    ])
-
-    breakdowns = df_shifted.filter(
-        valid_setup & 
-        (pl.col("close") < pl.col("PrevLow5")) & 
-        (pl.col("close") < pl.col("ema20")) & 
-        (pl.col("adx") >= MIN_ADX)
-    ).with_columns([
-        pl.lit("PRE_BREAKDOWN").alias("type"),
-        pl.col("PrevLow5").alias("entry"),
-        pl.min_horizontal([pl.col("PrevHigh5"), pl.col("PrevLow5") * (1 + MAX_SL_PCT)]).alias("sl")
-    ]).with_columns([
-        (pl.col("entry") - (pl.col("sl") - pl.col("entry")) * TARGET_X).alias("target")
-    ])
-
-    all_signals = pl.concat([breakouts, breakdowns]).sort(["symbol", "datetime_val"])
-
-    if all_signals.is_empty():
+    if not all_signals:
+        print("ℹ️ No signals matched conditions.")
         return
 
-    # First instance filter
-    all_signals = all_signals.with_columns([
-        pl.col("datetime_val").diff().over(["symbol", "type"]).dt.total_days().alias("days_since_last_signal")
-    ])
+    df_signals = pd.DataFrame(all_signals)
+
+    # 3. First Instance Filter (Remove consecutive duplicate signals)
+    df_signals['Date_DT'] = pd.to_datetime(df_signals['Date'], format="%d-%m-%Y")
+    df_signals = df_signals.sort_values(['Symbol', 'Type', 'Date_DT'])
     
-    first_instance_signals = all_signals.filter(
-        (pl.col("days_since_last_signal").is_null()) | (pl.col("days_since_last_signal") > 1)
-    ).sort("datetime_val", descending=True)
+    df_signals['Prev_Date'] = df_signals.groupby(['Symbol', 'Type'])['Date_DT'].shift(1)
+    df_signals['Days_Diff'] = (df_signals['Date_DT'] - df_signals['Prev_Date']).dt.days
 
-    formatted_signals = first_instance_signals.select([
-        pl.col("datetime_val").dt.strftime("%d-%m-%Y").alias("date"),
-        pl.col("symbol"),
-        pl.col("type"),
-        pl.col("entry").round(2),
-        pl.col("sl").round(2),
-        pl.col("target").round(2),
-        pl.col("close").round(2),
-        pl.col("ema20").round(2).alias("ema"),
-        pl.col("adx").round(2).alias("adx"),
-        pl.col("PrevCompression").round(4).alias("compression"),
-        (pl.col("volume") / pl.col("PrevAvgVol10")).round(2).alias("vol_ratio")
-    ])
+    # Keep only first instance (where gap > 1 day or first time trigger)
+    first_instance = df_signals[df_signals['Days_Diff'].isna() | (df_signals['Days_Diff'] > 1)].copy()
+    first_instance = first_instance.sort_values('Date_DT', ascending=False)
+
+    # Save to CSV
+    export_df = first_instance[['Date', 'Symbol', 'Type', 'Entry', 'SL', 'Target', 'Close', 'EMA', 'ADX', 'Compression', 'VolRatio']]
+    export_df.columns = ['date', 'symbol', 'type', 'entry', 'sl', 'target', 'close', 'ema', 'adx', 'compression', 'vol_ratio']
 
     os.makedirs("data", exist_ok=True)
-    formatted_signals.write_csv(SIGNALS_CSV)
+    export_df.to_csv(SIGNALS_CSV, index=False)
+    print(f"✅ Saved {len(export_df)} accurate historical signals to {SIGNALS_CSV}.")
 
-    # Dispatch alerts
-    today_signals = formatted_signals.filter(pl.col("date") == latest_date_str)
+    # 4. Dispatch Telegram Alerts for Today's Date
+    today_signals = export_df[export_df['date'] == latest_date].to_dict('records')
     
-    if not today_signals.is_empty():
-        for sig in today_signals.to_dicts():
+    if today_signals:
+        print(f"📢 Sending {len(today_signals)} alerts for today ({latest_date})...")
+        for sig in today_signals:
             send_telegram_alert(sig)
-        
-        # SEND SUMMARY WEBLINK AT THE VERY END
-        send_summary_telegram(len(today_signals), latest_date_str)
+        send_summary_telegram(len(today_signals), latest_date)
+    else:
+        print(f"ℹ️ No new signals triggered today ({latest_date}).")
 
 
 if __name__ == "__main__":
