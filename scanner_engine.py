@@ -6,151 +6,209 @@ import numpy as np
 import requests
 
 # ==========================================
-# CONFIGURATION
+# CONFIGURATION & ENVIRONMENT
 # ==========================================
 DB_PATH = "data/candles.duckdb"
 SIGNALS_CSV = "data/signals.csv"
 
-TARGET_X = 3.0
+TARGET_X = 3.0  # R:R Multiple
+REJECTION_THRESHOLD_BRS = 75.0  # Hard Score Floor
 
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN") or os.getenv("TELEGRAM_TOKEN") or os.getenv("BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID") or os.getenv("CHAT_ID")
 DASHBOARD_URL = "https://brahmastra-tech.github.io/brahmastra-scanner/"
 
+def run_institutional_engine():
+    print("🚀 Running Institutional Breakout & Pre-Expansion Engine (IBPE-v1)...")
 
-def scan_symbol_exact(symbol, df_sym):
-    alerts = []
+    if not os.path.exists(DB_PATH):
+        print(f"❌ Database not found at {DB_PATH}. Run bhavcopy_ingest.py first!")
+        return
 
-    if df_sym.empty or len(df_sym) < 3:
-        return alerts
+    conn = duckdb.connect(DB_PATH)
 
-    df = df_sym.copy().sort_values("Date").reset_index(drop=True)
+    # 1. Fetch historical candles from DuckDB
+    df_raw = conn.execute("""
+        SELECT symbol AS Symbol, CAST(timestamp AS DATE) AS Date, 
+               open AS Open, high AS High, low AS Low, close AS Close, 
+               volume AS Volume, delivery_qty AS DeliveryQty, 
+               delivery_pct AS DeliveryPct, open_interest AS OpenInterest
+        FROM ohlcv_candles
+        ORDER BY symbol, timestamp ASC
+    """).df()
 
-    # 1. Flexible Column Mapping for Delivery Data
-    deliv_qty_col = None
-    for col in ['delivery_qty', 'delivery_volume', 'DeliveryQty', 'DeliveryVolume', 'deliv_qty', 'sec_delivery_qty']:
-        if col in df.columns:
-            deliv_qty_col = col
-            break
+    conn.close()
 
-    deliv_pct_col = None
-    for col in ['delivery_pct', 'DeliveryPct', 'deliv_pct', 'sec_delivery_pct']:
-        if col in df.columns:
-            deliv_pct_col = col
-            break
+    if df_raw.empty:
+        print("⚠️ No candle data found in database.")
+        return
 
-    has_real_delivery = deliv_qty_col is not None
+    latest_date_str = pd.to_datetime(df_raw['Date'].max()).strftime("%d-%m-%Y")
+    print(f"🔍 Processing Date: {latest_date_str} | Active Universe: {df_raw['Symbol'].nunique()} Securities")
 
-    if has_real_delivery:
-        df['MetricQty'] = pd.to_numeric(df[deliv_qty_col], errors='coerce')
-        if deliv_pct_col is not None:
-            df['DeliveryPct'] = pd.to_numeric(df[deliv_pct_col], errors='coerce')
-        else:
-            df['DeliveryPct'] = (df['MetricQty'] / df['Volume']) * 100.0
+    # 2. Extract synthetic NIFTY50 benchmark representation
+    nifty_df = df_raw.groupby('Date')['Close'].mean().reset_index().rename(columns={'Close': 'Close_Nifty'})
+
+    # 3. Vectorized Multi-Factor Technical Calculations
+    df = pd.merge(df_raw, nifty_df, on='Date', how='left')
+
+    # Moving Averages
+    df['EMA20'] = df.groupby('Symbol')['Close'].transform(lambda x: x.ewm(span=20, adjust=False).mean())
+    df['EMA50'] = df.groupby('Symbol')['Close'].transform(lambda x: x.ewm(span=50, adjust=False).mean())
+    df['EMA200'] = df.groupby('Symbol')['Close'].transform(lambda x: x.ewm(span=200, adjust=False).mean())
+
+    # ATR & Variance Contraction
+    high_low = df['High'] - df['Low']
+    high_cp = (df['High'] - df.groupby('Symbol')['Close'].shift(1)).abs()
+    low_cp = (df['Low'] - df.groupby('Symbol')['Close'].shift(1)).abs()
+    tr = pd.concat([high_low, high_cp, low_cp], axis=1).max(axis=1)
+
+    df['ATR14'] = tr.groupby(df['Symbol']).transform(lambda x: x.rolling(14).mean())
+    df['ATR100'] = tr.groupby(df['Symbol']).transform(lambda x: x.rolling(100, min_periods=20).mean())
+    df['ATR_Ratio'] = df['ATR14'] / (df['ATR100'] + 1e-5)
+
+    # Squeeze Ratios (Bollinger vs Keltner)
+    df['STD20'] = df.groupby('Symbol')['Close'].transform(lambda x: x.rolling(20).std())
+    df['BB_Width'] = (4 * df['STD20']) / df['EMA20']
+    df['Keltner_Width'] = (3 * df['ATR14']) / df['EMA20']
+    df['Squeeze_Ratio'] = df['BB_Width'] / (df['Keltner_Width'] + 1e-5)
+
+    # Volume & Delivery Features
+    df['Vol_SMA20'] = df.groupby('Symbol')['Volume'].transform(lambda x: x.rolling(20).mean())
+    df['Vol_Dryup'] = df['Volume'] / (df['Vol_SMA20'] + 1e-5)
+    df['Deliv_SMA20'] = df.groupby('Symbol')['DeliveryQty'].transform(lambda x: x.rolling(20).mean())
+    df['Deliv_Spike'] = df['DeliveryQty'] / (df['Deliv_SMA20'] + 1e-5)
+
+    # Derivative OI Shifts
+    df['OI_Shift'] = df.groupby('Symbol')['OpenInterest'].diff()
+    df['OI_Shift_SMA20'] = df.groupby('Symbol')['OI_Shift'].transform(lambda x: x.rolling(20).mean().abs())
+    df['Price_Shift'] = df.groupby('Symbol')['Close'].diff()
+
+    # Mansfield Relative Strength
+    df['PR'] = df['Close'] / df['Close_Nifty']
+    df['PR_SMA252'] = df.groupby('Symbol')['PR'].transform(lambda x: x.rolling(252, min_periods=20).mean())
+    df['Mansfield_RS'] = ((df['PR'] / df['PR_SMA252']) - 1) * 100
+
+    # 4. Filter for latest bar execution
+    latest_bar = df[df['Date'] == df['Date'].max()].copy()
+    all_signals = []
+
+    for _, row in latest_bar.iterrows():
+        symbol = row['Symbol']
+
+        # Layer 1: Baseline Liquidity
+        if row['Volume'] < 300000:
+            continue
+
+        # Layer 2: Wyckoff / Weinstein Stage 2B Classification
+        is_ema_aligned = (row['EMA20'] > row['EMA50']) and (row['EMA50'] > row['EMA200'])
+        is_volatility_compressed = (row['Squeeze_Ratio'] < 1.0) and (row['ATR_Ratio'] <= 0.70)
+
+        if not (is_ema_aligned and is_volatility_compressed):
+            continue
+
+        stage = "STAGE 2B: BREAKOUT READY"
+
+        # Layer 3 & 4: Delivery Absorption & OI Setup
+        if row['DeliveryPct'] < 45.0 or row['Price_Shift'] <= 0:
+            continue
+
+        # Layer 5: Institutional BRS Scoring Engine
+        s_vcp = np.clip((1.0 - row['Squeeze_Ratio']) / (1.0 - 0.5) * 100, 0, 100)
+        s_deliv = np.clip((row['DeliveryPct'] / 75.0 * 50) + (row['Deliv_Spike'] / 1.8 * 50), 0, 100)
+        
+        oi_ratio = row['OI_Shift'] / (row['OI_Shift_SMA20'] + 1e-5)
+        s_oi = np.clip(oi_ratio / 2.0 * 100, 0, 100) if row['Price_Shift'] > 0 else 0
+
+        s_rs = np.clip((row['Mansfield_RS'] - (-2)) / (5 - (-2)) * 100, 0, 100)
+        s_vp = 100 if row['Vol_Dryup'] <= 0.60 else 50
+
+        brs_score = round((0.25 * s_vcp) + (0.20 * s_deliv) + (0.20 * s_oi) + (0.15 * s_rs) + (0.20 * s_vp), 2)
+
+        # Apply Rejection Floor
+        if brs_score < REJECTION_THRESHOLD_BRS:
+            continue
+
+        entry = round(row['High'], 2)
+        sl = round(row['Low'], 2)
+        target = round(entry + (entry - sl) * TARGET_X, 2)
+
+        all_signals.append({
+            "Date": latest_date_str,
+            "Symbol": symbol,
+            "Timeframe": "D",
+            "Type": "PRE_BREAKOUT",
+            "Pattern": stage,
+            "BRS_Score": brs_score,
+            "Entry": entry,
+            "SL": sl,
+            "Target": target,
+            "Close": round(row['Close'], 2),
+            "Volume": int(row['Volume']),
+            "DeliveryQty": int(row['DeliveryQty']),
+            "DeliveryPct": round(row['DeliveryPct'], 2),
+            "DelivSpikeRatio": round(row['Deliv_Spike'], 2),
+            "Mansfield_RS": round(row['Mansfield_RS'], 2)
+        })
+
+    os.makedirs("data", exist_ok=True)
+
+    # Sort candidates by Breakout Readiness Score
+    if all_signals:
+        export_df = pd.DataFrame(all_signals).sort_values("BRS_Score", ascending=False)
     else:
-        # Fallback to Total Volume if DuckDB schema lacks delivery columns
-        df['MetricQty'] = df['Volume']
-        df['DeliveryPct'] = np.nan
+        export_df = pd.DataFrame(columns=[
+            'Date', 'Symbol', 'Timeframe', 'Type', 'Pattern', 'BRS_Score',
+            'Entry', 'SL', 'Target', 'Close', 'Volume', 'DeliveryQty',
+            'DeliveryPct', 'DelivSpikeRatio', 'Mansfield_RS'
+        ])
 
-    df['Prev_MetricQty'] = df['MetricQty'].shift(1)
+    export_df.to_csv(SIGNALS_CSV, index=False)
+    print(f"✅ Saved {len(export_df)} Elite Stage 2B candidates to {SIGNALS_CSV}.")
 
-    seen = set()
+    today_candidates = export_df.to_dict('records')
 
-    for i in range(1, len(df)):
-        row = df.iloc[i]
-
-        open_p = float(row["Open"])
-        high_p = float(row["High"])
-        low_p = float(row["Low"])
-        close_p = float(row["Close"])
-        volume = float(row["Volume"])
-
-        if pd.isna(row["MetricQty"]) or pd.isna(row["Prev_MetricQty"]):
-            continue
-
-        qty = float(row["MetricQty"])
-        prev_qty = float(row["Prev_MetricQty"])
-        deliv_pct = float(row["DeliveryPct"]) if pd.notna(row["DeliveryPct"]) else 0.0
-
-        if prev_qty <= 0:
-            continue
-
-        spike_ratio = qty / prev_qty
-
-        # -------------------------------------------------------------
-        # EXACT ACCUMULATION RULES
-        # -------------------------------------------------------------
-        c1_vol = volume > 500000                                 # [0] Volume > 500000
-        c2_spike = qty > (prev_qty * 3.0)                       # [0] Volume/Delivery Vol > Prev Vol * 3
-        c3_deliv_pct = deliv_pct > 55.0 if has_real_delivery else True  # [0] Delivery % > 55
-        c4_close_min = close_p >= (open_p * 0.99)               # [0] Close >= Open * 0.99
-        c5_close_max = close_p <= (open_p * 1.02)               # [0] Close <= Open * 1.02
-        c6_range_squeeze = (high_p - low_p) <= (close_p * 0.03)  # [0] High - Low <= Close * 0.03
-
-        if not (c1_vol and c2_spike and c3_deliv_pct and c4_close_min and c5_close_max and c6_range_squeeze):
-            continue
-
-        date_str = pd.to_datetime(row["Date"]).strftime("%d-%m-%Y")
-        key = (symbol, date_str, "ACCUMULATION")
-
-        if key not in seen:
-            seen.add(key)
-
-            entry = round(high_p, 2)
-            sl = round(low_p, 2)
-            target = round(entry + (entry - sl) * TARGET_X, 2)
-
-            alerts.append({
-                "Date": date_str,
-                "Symbol": symbol,
-                "Timeframe": "D",
-                "Type": "PRE_BREAKOUT",
-                "Pattern": "DELIVERY_ACCUMULATION" if has_real_delivery else "VOLUME_ACCUMULATION",
-                "Entry": entry,
-                "SL": sl,
-                "Target": target,
-                "Close": round(close_p, 2),
-                "Volume": int(volume),
-                "DeliveryQty": int(qty) if has_real_delivery else 0,
-                "DeliveryPct": round(deliv_pct, 2) if has_real_delivery else 0.0,
-                "DelivSpikeRatio": round(spike_ratio, 2)
-            })
-
-    return alerts
+    # Dispatch alerts to Telegram
+    try:
+        for sig in today_candidates[:3]:  # Push top 3 scored candidates
+            send_telegram_alert(sig)
+            time.sleep(0.5)
+    finally:
+        send_summary_telegram(today_candidates, latest_date_str)
 
 
 def send_telegram_alert(signal: dict):
-    """Sends individual stock alert to Telegram."""
+    """Dispatches ranked candidate card to Telegram."""
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
-        print("⚠️ Telegram credentials missing. Skipping individual alert.")
         return
 
     symbol = signal.get("Symbol")
+    brs = signal.get("BRS_Score")
     setup_date = signal.get("Date")
     entry = signal.get("Entry")
     sl = signal.get("SL")
     target = signal.get("Target")
     close = signal.get("Close")
     deliv_pct = signal.get("DeliveryPct", 0.0)
-    deliv_spike = signal.get("DelivSpikeRatio", 0.0)
+    rs_val = signal.get("Mansfield_RS", 0.0)
 
-    emoji = "🚀"
     chart_url = f"https://in.tradingview.com/chart/?symbol=NSE:{symbol}"
 
     message = (
-        f"{emoji} <b>BRAHMASTRA ACCUMULATION WATCHLIST</b>\n"
+        f"🏛️ <b>INSTITUTIONAL BREAKOUT CANDIDATE</b>\n"
         f"━━━━━━━━━━━━━━━━━━━━\n"
         f"📈 <b>Stock:</b> {symbol} (NSE F&O)\n"
-        f"🎯 <b>Pattern:</b> 3x Accumulation Squeeze\n"
-        f"⏱ <b>Setup Date:</b> {setup_date}\n\n"
+        f"⭐ <b>BRS Score:</b> {brs} / 100\n"
+        f"🎯 <b>Stage:</b> Stage 2B (Breakout Ready)\n"
+        f"⏱ <b>Date:</b> {setup_date}\n\n"
         f"📊 <b>ACTIONABLE TRIGGER LEVELS</b>\n"
-        f"• <b>Trigger Buy Above   :</b> ₹{entry:.2f}\n"
+        f"• <b>Trigger Entry Price :</b> ₹{entry:.2f}\n"
         f"• <b>Stop Loss           :</b> ₹{sl:.2f}\n"
         f"• <b>Target (3x)         :</b> ₹{target:.2f}\n"
         f"• <b>Today's Close       :</b> ₹{close:.2f}\n\n"
-        f"⚡ <b>ACCUMULATION METRICS</b>\n"
+        f"⚡ <b>INSTITUTIONAL METRICS</b>\n"
         f"• <b>Delivery %          :</b> {deliv_pct:.1f}%\n"
-        f"• <b>Volume/Deliv Spike  :</b> {deliv_spike:.2f}x vs Yesterday\n"
+        f"• <b>Mansfield RS Alpha  :</b> +{rs_val:.2f}\n"
         f"━━━━━━━━━━━━━━━━━━━━\n"
         f"📈 <a href='{chart_url}'>View {symbol} TradingView Chart</a>"
     )
@@ -162,29 +220,19 @@ def send_telegram_alert(signal: dict):
         "parse_mode": "HTML",
         "disable_web_page_preview": True
     }
-    try:
-        res = requests.post(url, json=payload, timeout=10)
-        if res.status_code == 200:
-            print(f"✅ Telegram alert sent for {symbol}")
-        else:
-            print(f"❌ Telegram API Error ({res.status_code}): {res.text}")
-    except Exception as e:
-        print(f"❌ Exception sending Telegram alert: {e}")
+    requests.post(url, json=payload, timeout=10)
 
 
-def send_summary_telegram(signals_today: list, date_str: str):
-    """Sends scan execution summary to Telegram."""
+def send_summary_telegram(candidates: list, date_str: str):
+    """Sends execution summary to Telegram."""
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
-        print("⚠️ Telegram credentials missing. Skipping summary dispatch.")
         return
 
-    total_count = len(signals_today)
-
     message = (
-        f"🏁 <b>DAILY ACCUMULATION SCAN COMPLETE ({date_str})</b>\n"
+        f"🏁 <b>INSTITUTIONAL ENGINE EXECUTION COMPLETE ({date_str})</b>\n"
         f"━━━━━━━━━━━━━━━━━━━━\n"
-        f"📊 <b>High-Conviction Squeeze Candidates Found Today:</b> {total_count}\n\n"
-        f"🌐 <b>Interactive Web Dashboard & Full History:</b>\n"
+        f"📊 <b>Stage 2B Qualified Candidates:</b> {len(candidates)}\n\n"
+        f"🌐 <b>Interactive Web Dashboard:</b>\n"
         f"👉 <a href='{DASHBOARD_URL}'>{DASHBOARD_URL}</a>\n"
         f"━━━━━━━━━━━━━━━━━━━━"
     )
@@ -196,79 +244,8 @@ def send_summary_telegram(signals_today: list, date_str: str):
         "parse_mode": "HTML",
         "disable_web_page_preview": False
     }
-    try:
-        res = requests.post(url, json=payload, timeout=10)
-        if res.status_code == 200:
-            print(f"✅ Telegram summary sent successfully for {date_str}")
-        else:
-            print(f"❌ Telegram Summary API Error ({res.status_code}): {res.text}")
-    except Exception as e:
-        print(f"❌ Exception sending Telegram summary: {e}")
-
-
-def run_scanner():
-    print("🚀 Running Final Accumulation Scanner Engine...")
-
-    if not os.path.exists(DB_PATH):
-        print(f"❌ Database file not found at {DB_PATH}!")
-        return
-
-    conn = duckdb.connect(DB_PATH)
-
-    df_raw = conn.execute("""
-        SELECT * FROM ohlcv_candles ORDER BY symbol, timestamp ASC
-    """).df()
-
-    if df_raw.empty:
-        print("⚠️ No candles available in DuckDB.")
-        return
-
-    # Standardize Column Names
-    df_raw.rename(columns={
-        'symbol': 'Symbol', 'timestamp': 'Date', 'open': 'Open',
-        'high': 'High', 'low': 'Low', 'close': 'Close', 'volume': 'Volume'
-    }, inplace=True)
-
-    latest_date_str = pd.to_datetime(df_raw['Date'].max()).strftime("%d-%m-%Y")
-    print(f"🔍 Database Market Date: {latest_date_str} | Total Symbols: {df_raw['Symbol'].nunique()}")
-
-    symbols = df_raw['Symbol'].unique()
-    all_signals = []
-
-    for sym in symbols:
-        df_sym = df_raw[df_raw['Symbol'] == sym]
-        alerts = scan_symbol_exact(sym, df_sym)
-        if alerts:
-            all_signals.extend(alerts)
-
-    os.makedirs("data", exist_ok=True)
-
-    if not all_signals:
-        print("ℹ️ No signals matched conditions overall.")
-        pd.DataFrame(columns=['Date', 'Symbol', 'Timeframe', 'Type', 'Pattern', 'Entry', 'SL', 'Target', 'Close', 'Volume', 'DeliveryQty', 'DeliveryPct', 'DelivSpikeRatio']).to_csv(SIGNALS_CSV, index=False)
-        send_summary_telegram([], latest_date_str)
-        return
-
-    # Export clean history to CSV
-    export_df = pd.DataFrame(all_signals)
-    date_col = "Date" if "Date" in export_df.columns else "date"
-    export_df["Date_DT"] = pd.to_datetime(export_df[date_col], format="%d-%m-%Y")
-
-    export_df = export_df.sort_values("Date_DT", ascending=False).drop(columns=["Date_DT"])
-    export_df.to_csv(SIGNALS_CSV, index=False)
-    print(f"✅ Saved {len(export_df)} total historical signals to {SIGNALS_CSV}.")
-
-    # Extract today's signals
-    today_signals = export_df[export_df[date_col] == latest_date_str].to_dict('records')
-    print(f"📊 Candidates for Today ({latest_date_str}): {len(today_signals)}")
-
-    try:
-        for sig in today_signals:
-            send_telegram_alert(sig)
-            time.sleep(0.5)
-    finally:
-        send_summary_telegram(today_signals, latest_date_str)
+    requests.post(url, json=payload, timeout=10)
 
 
 if __name__ == "__main__":
-    run_scanner()
+    run_institutional_engine()
