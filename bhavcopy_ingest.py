@@ -3,104 +3,110 @@ import io
 import zipfile
 import requests
 import duckdb
-import polars as pl
-from datetime import datetime
+import pandas as pd
+from datetime import datetime, timedelta
 
-class BhavcopyIngestor:
-    def __init__(self, db_path="data/candles.duckdb"):
-        self.db_path = db_path
-        os.makedirs("data", exist_ok=True)
-        self._init_db()
+# ==========================================
+# CONFIGURATION
+# ==========================================
+DB_PATH = "data/candles.duckdb"
+HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "Accept": "*/*"
+}
 
-    def _init_db(self):
-        with duckdb.connect(self.db_path) as conn:
-            conn.execute("""
-                CREATE TABLE IF NOT EXISTS ohlcv_candles (
-                    symbol VARCHAR,
-                    timeframe VARCHAR,
-                    timestamp TIMESTAMP,
-                    open DOUBLE,
-                    high DOUBLE,
-                    low DOUBLE,
-                    close DOUBLE,
-                    volume BIGINT,
-                    open_interest BIGINT DEFAULT 0,
-                    PRIMARY KEY (symbol, timeframe, timestamp)
-                );
-            """)
+def init_db(conn):
+    """Initializes DuckDB schema with delivery and open interest support."""
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS ohlcv_candles (
+            symbol VARCHAR,
+            timestamp DATE,
+            open DOUBLE,
+            high DOUBLE,
+            low DOUBLE,
+            close DOUBLE,
+            volume DOUBLE,
+            delivery_qty DOUBLE,
+            delivery_pct DOUBLE,
+            open_interest DOUBLE,
+            PRIMARY KEY (symbol, timestamp)
+        );
+    """)
 
-    def get_fno_symbols_list(self) -> set:
-        url = "https://nsearchives.nseindia.com/content/fo/fo_mktlots.csv"
-        headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-            "Accept": "*/*"
-        }
-        try:
-            res = requests.get(url, headers=headers, timeout=10)
-            if res.status_code == 200:
-                df_fno = pl.read_csv(io.BytesIO(res.content))
-                fno_symbols = [s.strip() for s in df_fno.select(df_fno.columns[1]).to_series().to_list() if s]
-                return set(fno_symbols)
-        except Exception as e:
-            print(f"⚠️ Warning: Could not fetch F&O list ({e}).")
-        return set()
+def fetch_nse_bhavcopy(target_date: datetime):
+    """Fetches full NSE daily sec_bhavdata_full CSV including Delivery and OI metrics."""
+    date_str = target_date.strftime("%d%m%Y")
+    url = f"https://archives.nseindia.com/products/content/sec_bhavdata_full_{date_str}.csv"
+    
+    try:
+        response = requests.get(url, headers=HEADERS, timeout=15)
+        if response.status_code == 200:
+            df = pd.read_csv(io.StringIO(response.text))
+            df.columns = df.columns.str.strip()
+            return df
+        else:
+            print(f"⚠️ No Bhavcopy available for {target_date.strftime('%Y-%m-%d')} (HTTP {response.status_code})")
+            return None
+    except Exception as e:
+        print(f"❌ Error downloading Bhavcopy for {target_date.strftime('%Y-%m-%d')}: {e}")
+        return None
 
-    def fetch_and_store_daily(self, date_str: str):
-        dt = datetime.strptime(date_str, "%Y-%m-%d")
-        date_formatted = dt.strftime("%Y%m%d")
+def process_and_store():
+    os.makedirs("data", exist_ok=True)
+    conn = duckdb.connect(DB_PATH)
+    init_db(conn)
+
+    # Ingest last 5 trading days if missing
+    today = datetime.now()
+    for i in range(5, -1, -1):
+        target_date = today - timedelta(days=i)
         
-        fno_allowed_symbols = self.get_fno_symbols_list()
-        url = f"https://nsearchives.nseindia.com/content/cm/BhavCopy_NSE_CM_0_0_0_{date_formatted}_F_0000.csv.zip"
-        headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-            "Referer": "https://www.nseindia.com/"
-        }
+        # Skip weekends
+        if target_date.weekday() >= 5:
+            continue
 
-        print(f"Downloading Bhavcopy for {date_str}...")
-        session = requests.Session()
-        session.get("https://www.nseindia.com", headers=headers, timeout=10)
-        res = session.get(url, headers=headers, timeout=15)
+        date_db_format = target_date.strftime("%Y-%m-%d")
         
-        if res.status_code != 200:
-            print(f"❌ Failed to fetch data (Status {res.status_code}). Market closed or file unavailable.")
-            return
+        # Check if date already ingested
+        existing = conn.execute("SELECT COUNT(*) FROM ohlcv_candles WHERE timestamp = ?", [date_db_format]).fetchone()[0]
+        if existing > 0:
+            print(f"ℹ️ Date {date_db_format} already in DuckDB. Skipping.")
+            continue
 
-        with zipfile.ZipFile(io.BytesIO(res.content)) as z:
-            csv_name = z.namelist()[0]
-            with z.open(csv_name) as f:
-                df = pl.read_csv(f.read())
+        print(f"📥 Fetching NSE Bhavcopy for {date_db_format}...")
+        df_raw = fetch_nse_bhavcopy(target_date)
 
-        df = df.rename({col: col.strip() for col in df.columns})
+        if df_raw is None or df_raw.empty:
+            continue
 
-        # Filter Equity series (SctySrs == "EQ")
-        df_filtered = df.filter(pl.col("SctySrs") == "EQ")
-        if fno_allowed_symbols:
-            df_filtered = df_filtered.filter(pl.col("TckrSymb").is_in(list(fno_allowed_symbols)))
+        # Filter strictly for EQ Series (Equity/F&O stocks)
+        df_eq = df_raw[df_raw['SERIES'].astype(str).str.strip() == 'EQ'].copy()
 
-        # Exact NSE UDiFF Schema Mapping
-        df_clean = df_filtered.select([
-            pl.col("TckrSymb").alias("symbol"),
-            pl.lit("1D").alias("timeframe"),
-            pl.lit(dt).alias("timestamp"),
-            pl.col("OpnPric").cast(pl.Float64).alias("open"),
-            pl.col("HghPric").cast(pl.Float64).alias("high"),
-            pl.col("LwPric").cast(pl.Float64).alias("low"),
-            pl.col("ClsPric").cast(pl.Float64).alias("close"),
-            pl.col("TtlTradgVol").cast(pl.Int64).alias("volume"),
-            pl.col("OpnIntrst").cast(pl.Int64).alias("open_interest")
-        ])
+        if df_eq.empty:
+            continue
 
-        with duckdb.connect(self.db_path) as conn:
-            conn.register("temp_bhavcopy", df_clean.to_arrow())
-            conn.execute("""
-                INSERT OR REPLACE INTO ohlcv_candles 
-                SELECT * FROM temp_bhavcopy
-            """)
-            
-        print(f"✓ Stored {len(df_clean)} F&O EQ stocks for {date_str}.")
+        # Map NSE columns to DuckDB schema
+        df_eq['symbol'] = df_eq['SYMBOL'].astype(str).str.strip()
+        df_eq['timestamp'] = pd.to_datetime(df_eq['DATE1'].astype(str).str.strip(), format="%d-%b-%Y").dt.strftime("%Y-%m-%d")
+        df_eq['open'] = pd.to_numeric(df_eq['OPEN_PRICE'], errors='coerce')
+        df_eq['high'] = pd.to_numeric(df_eq['HIGH_PRICE'], errors='coerce')
+        df_eq['low'] = pd.to_numeric(df_eq['LOW_PRICE'], errors='coerce')
+        df_eq['close'] = pd.to_numeric(df_eq['CLOSE_PRICE'], errors='coerce')
+        df_eq['volume'] = pd.to_numeric(df_eq['TTL_TRD_QNTY'], errors='coerce')
+        df_eq['delivery_qty'] = pd.to_numeric(df_eq['DELIV_QTY'], errors='coerce').fillna(0)
+        df_eq['delivery_pct'] = pd.to_numeric(df_eq['DELIV_PER'], errors='coerce').fillna(0)
+        df_eq['open_interest'] = 0.0  # Default 0.0 for EQ series if derivative file separate
+
+        final_df = df_eq[['symbol', 'timestamp', 'open', 'high', 'low', 'close', 'volume', 'delivery_qty', 'delivery_pct', 'open_interest']].dropna(subset=['symbol', 'close'])
+
+        # Upsert into DuckDB
+        conn.execute("""
+            INSERT OR REPLACE INTO ohlcv_candles 
+            SELECT * FROM final_df
+        """)
+        print(f"✅ Successfully ingested {len(final_df)} stocks for {date_db_format}.")
+
+    conn.close()
 
 if __name__ == "__main__":
-    ingestor = BhavcopyIngestor()
-    today_str = datetime.today().strftime("%Y-%m-%d")
-    ingestor.fetch_and_store_daily(today_str)
+    process_and_store()
