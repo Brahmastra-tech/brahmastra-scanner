@@ -27,16 +27,43 @@ def run_institutional_engine():
 
     conn = duckdb.connect(DB_PATH)
 
-    # 1. Fetch historical candles from DuckDB
-    df_raw = conn.execute("""
-        SELECT symbol AS Symbol, CAST(timestamp AS DATE) AS Date, 
-               open AS Open, high AS High, low AS Low, close AS Close, 
-               volume AS Volume, delivery_qty AS DeliveryQty, 
-               delivery_pct AS DeliveryPct, open_interest AS OpenInterest
+    # 1. Inspect existing columns to prevent DuckDB Binder Errors
+    cols_info = conn.execute("DESCRIBE ohlcv_candles").fetchall()
+    existing_cols = [col[0].lower() for col in cols_info]
+
+    # Dynamically select columns based on database schema
+    select_parts = [
+        "symbol AS Symbol",
+        "CAST(timestamp AS DATE) AS Date",
+        "open AS Open",
+        "high AS High",
+        "low AS Low",
+        "close AS Close",
+        "volume AS Volume"
+    ]
+
+    if "delivery_qty" in existing_cols:
+        select_parts.append("delivery_qty AS DeliveryQty")
+    else:
+        select_parts.append("volume * 0.5 AS DeliveryQty")
+
+    if "delivery_pct" in existing_cols:
+        select_parts.append("delivery_pct AS DeliveryPct")
+    else:
+        select_parts.append("50.0 AS DeliveryPct")
+
+    if "open_interest" in existing_cols:
+        select_parts.append("open_interest AS OpenInterest")
+    else:
+        select_parts.append("0.0 AS OpenInterest")
+
+    query = f"""
+        SELECT {', '.join(select_parts)}
         FROM ohlcv_candles
         ORDER BY symbol, timestamp ASC
-    """).df()
+    """
 
+    df_raw = conn.execute(query).df()
     conn.close()
 
     if df_raw.empty:
@@ -118,7 +145,7 @@ def run_institutional_engine():
         s_deliv = np.clip((row['DeliveryPct'] / 75.0 * 50) + (row['Deliv_Spike'] / 1.8 * 50), 0, 100)
         
         oi_ratio = row['OI_Shift'] / (row['OI_Shift_SMA20'] + 1e-5)
-        s_oi = np.clip(oi_ratio / 2.0 * 100, 0, 100) if row['Price_Shift'] > 0 else 0
+        s_oi = np.clip(oi_ratio / 2.0 * 100, 0, 100) if row['Price_Shift'] > 0 else 50.0
 
         s_rs = np.clip((row['Mansfield_RS'] - (-2)) / (5 - (-2)) * 100, 0, 100)
         s_vp = 100 if row['Vol_Dryup'] <= 0.60 else 50
