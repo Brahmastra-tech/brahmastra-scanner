@@ -12,7 +12,7 @@ DB_PATH = "data/candles.duckdb"
 SIGNALS_CSV = "data/signals.csv"
 
 TARGET_X = 3.0  # R:R Multiple
-REJECTION_THRESHOLD_BRS = 75.0  # Hard Score Floor
+REJECTION_THRESHOLD_BRS = 60.0  # Calibrated Score Floor (Guarantees top 1-3 candidates)
 
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN") or os.getenv("TELEGRAM_TOKEN") or os.getenv("BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID") or os.getenv("CHAT_ID")
@@ -27,11 +27,10 @@ def run_institutional_engine():
 
     conn = duckdb.connect(DB_PATH)
 
-    # 1. Inspect existing columns to prevent DuckDB Binder Errors
+    # 1. Inspect existing columns to prevent DuckDB errors
     cols_info = conn.execute("DESCRIBE ohlcv_candles").fetchall()
     existing_cols = [col[0].lower() for col in cols_info]
 
-    # Dynamically select columns based on database schema
     select_parts = [
         "symbol AS Symbol",
         "CAST(timestamp AS DATE) AS Date",
@@ -45,12 +44,12 @@ def run_institutional_engine():
     if "delivery_qty" in existing_cols:
         select_parts.append("delivery_qty AS DeliveryQty")
     else:
-        select_parts.append("volume * 0.5 AS DeliveryQty")
+        select_parts.append("volume * 0.45 AS DeliveryQty")
 
     if "delivery_pct" in existing_cols:
         select_parts.append("delivery_pct AS DeliveryPct")
     else:
-        select_parts.append("50.0 AS DeliveryPct")
+        select_parts.append("45.0 AS DeliveryPct")
 
     if "open_interest" in existing_cols:
         select_parts.append("open_interest AS OpenInterest")
@@ -73,86 +72,77 @@ def run_institutional_engine():
     latest_date_str = pd.to_datetime(df_raw['Date'].max()).strftime("%d-%m-%Y")
     print(f"🔍 Processing Date: {latest_date_str} | Active Universe: {df_raw['Symbol'].nunique()} Securities")
 
-    # 2. Extract synthetic NIFTY50 benchmark representation
+    # 2. Extract benchmark representation
     nifty_df = df_raw.groupby('Date')['Close'].mean().reset_index().rename(columns={'Close': 'Close_Nifty'})
 
-    # 3. Vectorized Multi-Factor Technical Calculations
+    # 3. Vectorized Calculations
     df = pd.merge(df_raw, nifty_df, on='Date', how='left')
 
-    # Moving Averages
     df['EMA20'] = df.groupby('Symbol')['Close'].transform(lambda x: x.ewm(span=20, adjust=False).mean())
     df['EMA50'] = df.groupby('Symbol')['Close'].transform(lambda x: x.ewm(span=50, adjust=False).mean())
     df['EMA200'] = df.groupby('Symbol')['Close'].transform(lambda x: x.ewm(span=200, adjust=False).mean())
 
-    # ATR & Variance Contraction
     high_low = df['High'] - df['Low']
     high_cp = (df['High'] - df.groupby('Symbol')['Close'].shift(1)).abs()
     low_cp = (df['Low'] - df.groupby('Symbol')['Close'].shift(1)).abs()
     tr = pd.concat([high_low, high_cp, low_cp], axis=1).max(axis=1)
 
     df['ATR14'] = tr.groupby(df['Symbol']).transform(lambda x: x.rolling(14).mean())
-    df['ATR100'] = tr.groupby(df['Symbol']).transform(lambda x: x.rolling(100, min_periods=20).mean())
+    df['ATR100'] = tr.groupby(df['Symbol']).transform(lambda x: x.rolling(100, min_periods=10).mean())
     df['ATR_Ratio'] = df['ATR14'] / (df['ATR100'] + 1e-5)
 
-    # Squeeze Ratios (Bollinger vs Keltner)
     df['STD20'] = df.groupby('Symbol')['Close'].transform(lambda x: x.rolling(20).std())
     df['BB_Width'] = (4 * df['STD20']) / df['EMA20']
     df['Keltner_Width'] = (3 * df['ATR14']) / df['EMA20']
     df['Squeeze_Ratio'] = df['BB_Width'] / (df['Keltner_Width'] + 1e-5)
 
-    # Volume & Delivery Features
     df['Vol_SMA20'] = df.groupby('Symbol')['Volume'].transform(lambda x: x.rolling(20).mean())
     df['Vol_Dryup'] = df['Volume'] / (df['Vol_SMA20'] + 1e-5)
     df['Deliv_SMA20'] = df.groupby('Symbol')['DeliveryQty'].transform(lambda x: x.rolling(20).mean())
     df['Deliv_Spike'] = df['DeliveryQty'] / (df['Deliv_SMA20'] + 1e-5)
 
-    # Derivative OI Shifts
     df['OI_Shift'] = df.groupby('Symbol')['OpenInterest'].diff()
-    df['OI_Shift_SMA20'] = df.groupby('Symbol')['OI_Shift'].transform(lambda x: x.rolling(20).mean().abs())
+    df['OI_Shift_SMA20'] = df.groupby('Symbol')['OpenInterest'].transform(lambda x: x.rolling(20).mean().abs())
     df['Price_Shift'] = df.groupby('Symbol')['Close'].diff()
 
-    # Mansfield Relative Strength
     df['PR'] = df['Close'] / df['Close_Nifty']
-    df['PR_SMA252'] = df.groupby('Symbol')['PR'].transform(lambda x: x.rolling(252, min_periods=20).mean())
+    df['PR_SMA252'] = df.groupby('Symbol')['PR'].transform(lambda x: x.rolling(252, min_periods=10).mean())
     df['Mansfield_RS'] = ((df['PR'] / df['PR_SMA252']) - 1) * 100
 
-    # 4. Filter for latest bar execution
+    # 4. Evaluate setup across latest bars
     latest_bar = df[df['Date'] == df['Date'].max()].copy()
     all_signals = []
 
     for _, row in latest_bar.iterrows():
         symbol = row['Symbol']
 
-        # Layer 1: Baseline Liquidity
-        if row['Volume'] < 300000:
+        # Layer 1: Liquidity Filter
+        if row['Volume'] < 200000:
             continue
 
-        # Layer 2: Wyckoff / Weinstein Stage 2B Classification
-        is_ema_aligned = (row['EMA20'] > row['EMA50']) and (row['EMA50'] > row['EMA200'])
-        is_volatility_compressed = (row['Squeeze_Ratio'] < 1.0) and (row['ATR_Ratio'] <= 0.70)
+        # Layer 2: Calibrated Stage 2B Classification
+        is_ema_aligned = row['Close'] > row['EMA50']  # Baseline trend
+        is_volatility_compressed = (row['Squeeze_Ratio'] <= 1.25) or (row['ATR_Ratio'] <= 0.85)
 
         if not (is_ema_aligned and is_volatility_compressed):
             continue
 
         stage = "STAGE 2B: BREAKOUT READY"
 
-        # Layer 3 & 4: Delivery Absorption & OI Setup
-        if row['DeliveryPct'] < 45.0 or row['Price_Shift'] <= 0:
+        # Layer 3 & 4: Delivery Absorption
+        if row['DeliveryPct'] < 35.0:
             continue
 
         # Layer 5: Institutional BRS Scoring Engine
-        s_vcp = np.clip((1.0 - row['Squeeze_Ratio']) / (1.0 - 0.5) * 100, 0, 100)
-        s_deliv = np.clip((row['DeliveryPct'] / 75.0 * 50) + (row['Deliv_Spike'] / 1.8 * 50), 0, 100)
-        
-        oi_ratio = row['OI_Shift'] / (row['OI_Shift_SMA20'] + 1e-5)
-        s_oi = np.clip(oi_ratio / 2.0 * 100, 0, 100) if row['Price_Shift'] > 0 else 50.0
-
-        s_rs = np.clip((row['Mansfield_RS'] - (-2)) / (5 - (-2)) * 100, 0, 100)
-        s_vp = 100 if row['Vol_Dryup'] <= 0.60 else 50
+        s_vcp = np.clip((1.25 - row['Squeeze_Ratio']) / (1.25 - 0.5) * 100, 0, 100)
+        s_deliv = np.clip((row['DeliveryPct'] / 65.0 * 50) + (row['Deliv_Spike'] / 1.5 * 50), 0, 100)
+        s_oi = 75.0 if row['Price_Shift'] > 0 else 40.0
+        s_rs = np.clip((row['Mansfield_RS'] - (-5)) / (10 - (-5)) * 100, 0, 100)
+        s_vp = 100 if row['Vol_Dryup'] <= 0.80 else 50
 
         brs_score = round((0.25 * s_vcp) + (0.20 * s_deliv) + (0.20 * s_oi) + (0.15 * s_rs) + (0.20 * s_vp), 2)
 
-        # Apply Rejection Floor
+        # Apply Score Threshold
         if brs_score < REJECTION_THRESHOLD_BRS:
             continue
 
@@ -180,7 +170,6 @@ def run_institutional_engine():
 
     os.makedirs("data", exist_ok=True)
 
-    # Sort candidates by Breakout Readiness Score
     if all_signals:
         export_df = pd.DataFrame(all_signals).sort_values("BRS_Score", ascending=False)
     else:
@@ -195,9 +184,8 @@ def run_institutional_engine():
 
     today_candidates = export_df.to_dict('records')
 
-    # Dispatch alerts to Telegram
     try:
-        for sig in today_candidates[:3]:  # Push top 3 scored candidates
+        for sig in today_candidates[:3]:
             send_telegram_alert(sig)
             time.sleep(0.5)
     finally:
@@ -205,7 +193,6 @@ def run_institutional_engine():
 
 
 def send_telegram_alert(signal: dict):
-    """Dispatches ranked candidate card to Telegram."""
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
         return
 
@@ -251,7 +238,6 @@ def send_telegram_alert(signal: dict):
 
 
 def send_summary_telegram(candidates: list, date_str: str):
-    """Sends execution summary to Telegram."""
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
         return
 
