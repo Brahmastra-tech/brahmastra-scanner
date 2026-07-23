@@ -86,7 +86,7 @@ def scan_symbol_exact(symbol, df_sym):
         c3_deliv_pct = deliv_pct > 55.0 if has_real_delivery else True  # [0] Delivery % > 55
         c4_close_min = close_p >= (open_p * 0.99)               # [0] Close >= Open * 0.99
         c5_close_max = close_p <= (open_p * 1.02)               # [0] Close <= Open * 1.02
-        c6_range_squeeze = (high_p - low_p) <= (close_p * 0.03)  # [0] High - Low <= Close * 0.03
+        c6_range_squeeze = (high_p - low_p) <= (close_p * 0.04)  # [0] High - Low <= Close * 0.03
 
         if not (c1_vol and c2_spike and c3_deliv_pct and c4_close_min and c5_close_max and c6_range_squeeze):
             continue
