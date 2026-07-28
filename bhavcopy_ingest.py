@@ -1,6 +1,5 @@
 import os
 import io
-import zipfile
 import requests
 import duckdb
 import pandas as pd
@@ -15,8 +14,9 @@ HEADERS = {
     "Accept": "*/*"
 }
 
-def init_db(conn):
-    """Initializes DuckDB schema with delivery and open interest support."""
+def init_and_migrate_db(conn):
+    """Initializes DuckDB schema and ensures all 10 columns exist."""
+    # 1. Base table creation
     conn.execute("""
         CREATE TABLE IF NOT EXISTS ohlcv_candles (
             symbol VARCHAR,
@@ -26,12 +26,15 @@ def init_db(conn):
             low DOUBLE,
             close DOUBLE,
             volume DOUBLE,
-            delivery_qty DOUBLE,
-            delivery_pct DOUBLE,
-            open_interest DOUBLE,
             PRIMARY KEY (symbol, timestamp)
         );
     """)
+
+    # 2. Dynamic column migrations (Safely upgrades existing 7 or 9 column tables)
+    conn.execute("ALTER TABLE ohlcv_candles ADD COLUMN IF NOT EXISTS delivery_qty DOUBLE;")
+    conn.execute("ALTER TABLE ohlcv_candles ADD COLUMN IF NOT EXISTS delivery_pct DOUBLE;")
+    conn.execute("ALTER TABLE ohlcv_candles ADD COLUMN IF NOT EXISTS open_interest DOUBLE;")
+
 
 def fetch_nse_bhavcopy(target_date: datetime):
     """Fetches full NSE daily sec_bhavdata_full CSV including Delivery and OI metrics."""
@@ -45,32 +48,31 @@ def fetch_nse_bhavcopy(target_date: datetime):
             df.columns = df.columns.str.strip()
             return df
         else:
-            print(f"⚠️ No Bhavcopy available for {target_date.strftime('%Y-%m-%d')} (HTTP {response.status_code})")
             return None
     except Exception as e:
         print(f"❌ Error downloading Bhavcopy for {target_date.strftime('%Y-%m-%d')}: {e}")
         return None
 
+
 def process_and_store():
     os.makedirs("data", exist_ok=True)
     conn = duckdb.connect(DB_PATH)
-    init_db(conn)
+    
+    # Ensure all 10 columns are present in the DuckDB table
+    init_and_migrate_db(conn)
 
-    # Ingest last 5 trading days if missing
     today = datetime.now()
-    for i in range(5, -1, -1):
+    # Ingest last 10 trading sessions if missing
+    for i in range(10, -1, -1):
         target_date = today - timedelta(days=i)
         
-        # Skip weekends
-        if target_date.weekday() >= 5:
+        if target_date.weekday() >= 5:  # Skip weekends
             continue
 
         date_db_format = target_date.strftime("%Y-%m-%d")
         
-        # Check if date already ingested
         existing = conn.execute("SELECT COUNT(*) FROM ohlcv_candles WHERE timestamp = ?", [date_db_format]).fetchone()[0]
         if existing > 0:
-            print(f"ℹ️ Date {date_db_format} already in DuckDB. Skipping.")
             continue
 
         print(f"📥 Fetching NSE Bhavcopy for {date_db_format}...")
@@ -79,13 +81,12 @@ def process_and_store():
         if df_raw is None or df_raw.empty:
             continue
 
-        # Filter strictly for EQ Series (Equity/F&O stocks)
+        # Filter strictly for EQ Series
         df_eq = df_raw[df_raw['SERIES'].astype(str).str.strip() == 'EQ'].copy()
 
         if df_eq.empty:
             continue
 
-        # Map NSE columns to DuckDB schema
         df_eq['symbol'] = df_eq['SYMBOL'].astype(str).str.strip()
         df_eq['timestamp'] = pd.to_datetime(df_eq['DATE1'].astype(str).str.strip(), format="%d-%b-%Y").dt.strftime("%Y-%m-%d")
         df_eq['open'] = pd.to_numeric(df_eq['OPEN_PRICE'], errors='coerce')
@@ -95,18 +96,28 @@ def process_and_store():
         df_eq['volume'] = pd.to_numeric(df_eq['TTL_TRD_QNTY'], errors='coerce')
         df_eq['delivery_qty'] = pd.to_numeric(df_eq['DELIV_QTY'], errors='coerce').fillna(0)
         df_eq['delivery_pct'] = pd.to_numeric(df_eq['DELIV_PER'], errors='coerce').fillna(0)
-        df_eq['open_interest'] = 0.0  # Default 0.0 for EQ series if derivative file separate
+        df_eq['open_interest'] = pd.to_numeric(df_eq.get('OPEN_INT', 0), errors='coerce').fillna(0)
 
-        final_df = df_eq[['symbol', 'timestamp', 'open', 'high', 'low', 'close', 'volume', 'delivery_qty', 'delivery_pct', 'open_interest']].dropna(subset=['symbol', 'close'])
+        final_df = df_eq[[
+            'symbol', 'timestamp', 'open', 'high', 'low', 'close', 
+            'volume', 'delivery_qty', 'delivery_pct', 'open_interest'
+        ]].dropna(subset=['symbol', 'close'])
 
-        # Upsert into DuckDB
+        # Explicit column mapping prevents 9 vs 10 column mismatch errors
         conn.execute("""
-            INSERT OR REPLACE INTO ohlcv_candles 
-            SELECT * FROM final_df
+            INSERT OR REPLACE INTO ohlcv_candles (
+                symbol, timestamp, open, high, low, close, 
+                volume, delivery_qty, delivery_pct, open_interest
+            )
+            SELECT 
+                symbol, timestamp, open, high, low, close, 
+                volume, delivery_qty, delivery_pct, open_interest
+            FROM final_df
         """)
-        print(f"✅ Successfully ingested {len(final_df)} stocks for {date_db_format}.")
+        print(f"✅ Ingested {len(final_df)} securities for {date_db_format}.")
 
     conn.close()
+
 
 if __name__ == "__main__":
     process_and_store()
