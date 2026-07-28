@@ -15,8 +15,7 @@ HEADERS = {
 }
 
 def init_and_migrate_db(conn):
-    """Initializes DuckDB schema and ensures all 10 columns exist."""
-    # 1. Base table creation
+    """Initializes DuckDB schema and ensures all required columns exist."""
     conn.execute("""
         CREATE TABLE IF NOT EXISTS ohlcv_candles (
             symbol VARCHAR,
@@ -30,14 +29,14 @@ def init_and_migrate_db(conn):
         );
     """)
 
-    # 2. Dynamic column migrations (Safely upgrades existing 7 or 9 column tables)
+    # Safe migrations
     conn.execute("ALTER TABLE ohlcv_candles ADD COLUMN IF NOT EXISTS delivery_qty DOUBLE;")
     conn.execute("ALTER TABLE ohlcv_candles ADD COLUMN IF NOT EXISTS delivery_pct DOUBLE;")
     conn.execute("ALTER TABLE ohlcv_candles ADD COLUMN IF NOT EXISTS open_interest DOUBLE;")
 
 
 def fetch_nse_bhavcopy(target_date: datetime):
-    """Fetches full NSE daily sec_bhavdata_full CSV including Delivery and OI metrics."""
+    """Fetches full NSE daily sec_bhavdata_full CSV including Delivery metrics."""
     date_str = target_date.strftime("%d%m%Y")
     url = f"https://archives.nseindia.com/products/content/sec_bhavdata_full_{date_str}.csv"
     
@@ -58,11 +57,11 @@ def process_and_store():
     os.makedirs("data", exist_ok=True)
     conn = duckdb.connect(DB_PATH)
     
-    # Ensure all 10 columns are present in the DuckDB table
+    # Ensure DuckDB table schema is ready
     init_and_migrate_db(conn)
 
     today = datetime.now()
-    # Ingest last 10 trading sessions if missing
+    # Ingest missing trailing trading sessions
     for i in range(10, -1, -1):
         target_date = today - timedelta(days=i)
         
@@ -94,16 +93,21 @@ def process_and_store():
         df_eq['low'] = pd.to_numeric(df_eq['LOW_PRICE'], errors='coerce')
         df_eq['close'] = pd.to_numeric(df_eq['CLOSE_PRICE'], errors='coerce')
         df_eq['volume'] = pd.to_numeric(df_eq['TTL_TRD_QNTY'], errors='coerce')
-        df_eq['delivery_qty'] = pd.to_numeric(df_eq['DELIV_QTY'], errors='coerce').fillna(0)
-        df_eq['delivery_pct'] = pd.to_numeric(df_eq['DELIV_PER'], errors='coerce').fillna(0)
-        df_eq['open_interest'] = pd.to_numeric(df_eq.get('OPEN_INT', 0), errors='coerce').fillna(0)
+        df_eq['delivery_qty'] = pd.to_numeric(df_eq['DELIV_QTY'], errors='coerce').fillna(0.0)
+        df_eq['delivery_pct'] = pd.to_numeric(df_eq['DELIV_PER'], errors='coerce').fillna(0.0)
+        
+        # Safely assign open_interest without AttributeError
+        if 'OPEN_INT' in df_eq.columns:
+            df_eq['open_interest'] = pd.to_numeric(df_eq['OPEN_INT'], errors='coerce').fillna(0.0)
+        else:
+            df_eq['open_interest'] = 0.0
 
         final_df = df_eq[[
             'symbol', 'timestamp', 'open', 'high', 'low', 'close', 
             'volume', 'delivery_qty', 'delivery_pct', 'open_interest'
         ]].dropna(subset=['symbol', 'close'])
 
-        # Explicit column mapping prevents 9 vs 10 column mismatch errors
+        # Explicit column mapping insertion
         conn.execute("""
             INSERT OR REPLACE INTO ohlcv_candles (
                 symbol, timestamp, open, high, low, close, 
