@@ -10,8 +10,7 @@ import requests
 # ==========================================
 DB_PATH = "data/candles.duckdb"
 SIGNALS_CSV = "data/signals.csv"
-
-TARGET_X = 3.0  # Risk:Reward Multiple
+TARGET_X = 3.0
 
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN") or os.getenv("TELEGRAM_TOKEN") or os.getenv("BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID") or os.getenv("CHAT_ID")
@@ -19,122 +18,86 @@ DASHBOARD_URL = "https://brahmastra-tech.github.io/brahmastra-scanner/"
 
 
 def compute_rsi(series: pd.Series, period: int = 14) -> pd.Series:
-    """Calculates Wilder's RSI safely without division by zero or NaN propagation."""
     delta = series.diff()
     gain = delta.clip(lower=0)
     loss = -1 * delta.clip(upper=0)
-    
     avg_gain = gain.ewm(alpha=1/period, min_periods=period, adjust=False).mean()
     avg_loss = loss.ewm(alpha=1/period, min_periods=period, adjust=False).mean()
-    
     rs = avg_gain / (avg_loss + 1e-5)
     rsi = 100.0 - (100.0 / (1.0 + rs))
     return rsi.fillna(50.0)
 
 
 def run_institutional_engine():
-    print("🚀 Running Brahmastra MTF RSI Squeeze & Institutional Engine...")
+    print("🚀 Running Brahmastra Scanner Engine...")
 
     if not os.path.exists(DB_PATH):
-        print(f"❌ Database not found at {DB_PATH}. Run bhavcopy_ingest.py first!")
+        print(f"❌ Database not found at {DB_PATH}.")
         return
 
     conn = duckdb.connect(DB_PATH)
-
     cols_info = conn.execute("DESCRIBE ohlcv_candles").fetchall()
     existing_cols = [col[0].lower() for col in cols_info]
 
     select_parts = [
         "symbol AS Symbol",
         "CAST(timestamp AS DATE) AS Date",
-        "open AS Open",
-        "high AS High",
-        "low AS Low",
-        "close AS Close",
-        "volume AS Volume"
+        "open AS Open", "high AS High", "low AS Low", "close AS Close", "volume AS Volume"
     ]
+    if "delivery_qty" in existing_cols: select_parts.append("delivery_qty AS DeliveryQty")
+    else: select_parts.append("volume * 0.45 AS DeliveryQty")
 
-    if "delivery_qty" in existing_cols:
-        select_parts.append("delivery_qty AS DeliveryQty")
-    else:
-        select_parts.append("volume * 0.45 AS DeliveryQty")
+    if "delivery_pct" in existing_cols: select_parts.append("delivery_pct AS DeliveryPct")
+    else: select_parts.append("45.0 AS DeliveryPct")
 
-    if "delivery_pct" in existing_cols:
-        select_parts.append("delivery_pct AS DeliveryPct")
-    else:
-        select_parts.append("45.0 AS DeliveryPct")
-
-    query = f"""
-        SELECT {', '.join(select_parts)}
-        FROM ohlcv_candles
-        ORDER BY symbol, timestamp ASC
-    """
-
-    df_raw = conn.execute(query).df()
+    df_raw = conn.execute(f"SELECT {', '.join(select_parts)} FROM ohlcv_candles ORDER BY symbol, timestamp ASC").df()
     conn.close()
 
     if df_raw.empty:
-        print("⚠️ No candle data found in database.")
+        print("⚠️ Database empty.")
         return
 
     df_raw["Date_DT"] = pd.to_datetime(df_raw["Date"])
     latest_date_str = df_raw['Date_DT'].max().strftime("%d-%m-%Y")
-    print(f"🔍 Processing Date: {latest_date_str} | Active Universe: {df_raw['Symbol'].nunique()} Securities")
 
     all_scored_signals = []
-    fallback_signals = []
 
     for symbol, df_sym in df_raw.groupby('Symbol'):
         if len(df_sym) < 15:
             continue
 
         df = df_sym.copy().sort_values("Date_DT").reset_index(drop=True)
+        df['DeliveryQty'] = df['DeliveryQty'].fillna(0.0)
+        df['DeliveryPct'] = df['DeliveryPct'].fillna(0.0)
+        df['Volume'] = df['Volume'].fillna(0.0)
 
-        # 1. Daily RSI
         df['RSI_Daily'] = compute_rsi(df['Close'], 14)
         df['Prev_RSI_Daily'] = df['RSI_Daily'].shift(1).fillna(df['RSI_Daily'])
 
-        # 2. Resample Weekly & Monthly
         df_weekly = df.set_index('Date_DT').resample('W-FRI').agg({'Close': 'last'}).dropna()
-        if len(df_weekly) >= 5:
-            df_weekly['RSI_Weekly'] = compute_rsi(df_weekly['Close'], 14)
-            df_weekly['Prev_RSI_Weekly'] = df_weekly['RSI_Weekly'].shift(1).fillna(df_weekly['RSI_Weekly'])
-        else:
-            df_weekly['RSI_Weekly'] = 55.0
-            df_weekly['Prev_RSI_Weekly'] = 50.0
+        df_weekly['RSI_Weekly'] = compute_rsi(df_weekly['Close'], 14) if len(df_weekly) >= 5 else 55.0
+        df_weekly['Prev_RSI_Weekly'] = df_weekly['RSI_Weekly'].shift(1) if len(df_weekly) >= 5 else 50.0
 
         df_monthly = df.set_index('Date_DT').resample('ME').agg({'Close': 'last'}).dropna()
-        if len(df_monthly) >= 2:
-            df_monthly['RSI_Monthly'] = compute_rsi(df_monthly['Close'], 14)
-            df_monthly['Prev_RSI_Monthly'] = df_monthly['RSI_Monthly'].shift(1).fillna(df_monthly['RSI_Monthly'])
-        else:
-            df_monthly['RSI_Monthly'] = 55.0
-            df_monthly['Prev_RSI_Monthly'] = 50.0
+        df_monthly['RSI_Monthly'] = compute_rsi(df_monthly['Close'], 14) if len(df_monthly) >= 2 else 55.0
+        df_monthly['Prev_RSI_Monthly'] = df_monthly['RSI_Monthly'].shift(1) if len(df_monthly) >= 2 else 50.0
 
-        df = pd.merge_asof(df, df_weekly[['RSI_Weekly', 'Prev_RSI_Weekly']], on='Date_DT', direction='backward')
-        df = pd.merge_asof(df, df_monthly[['RSI_Monthly', 'Prev_RSI_Monthly']], on='Date_DT', direction='backward')
+        df = pd.merge_asof(df, df_weekly[['RSI_Weekly', 'Prev_RSI_Weekly']], on='Date_DT', direction='backward').fillna(50.0)
+        df = pd.merge_asof(df, df_monthly[['RSI_Monthly', 'Prev_RSI_Monthly']], on='Date_DT', direction='backward').fillna(50.0)
 
-        df['RSI_Weekly'] = df['RSI_Weekly'].fillna(55.0)
-        df['Prev_RSI_Weekly'] = df['Prev_RSI_Weekly'].fillna(50.0)
-        df['RSI_Monthly'] = df['RSI_Monthly'].fillna(55.0)
-        df['Prev_RSI_Monthly'] = df['Prev_RSI_Monthly'].fillna(50.0)
-
-        # 3. Delivery & Range Metrics
-        df['Deliv_SMA20'] = df['DeliveryQty'].rolling(20, min_periods=1).mean().fillna(df['DeliveryQty'])
-        df['Deliv_Spike'] = (df['DeliveryQty'] / (df['Deliv_SMA20'] + 1e-5)).fillna(1.0)
         df['Day_Range'] = (df['High'] - df['Low']).clip(lower=1e-5)
         df['Close_Location'] = ((df['Close'] - df['Low']) / df['Day_Range']).fillna(0.5)
 
         row = df.iloc[-1]
 
-        # Chartink Filters with >= logic (prevents false exclusions)
         c_mtf_monthly = row['RSI_Monthly'] >= row['Prev_RSI_Monthly']
         c_mtf_weekly = row['RSI_Weekly'] >= row['Prev_RSI_Weekly']
-        
         rsi_diff = abs(row['RSI_Daily'] - row['Prev_RSI_Daily'])
         c_daily_rsi_squeeze = rsi_diff <= 3.5
 
-        # BRS Score
+        if not (c_mtf_monthly and c_mtf_weekly and c_daily_rsi_squeeze):
+            continue
+
         deliv_score = float(np.clip((row['DeliveryPct'] / 70.0 * 50.0), 10, 50))
         close_score = float(np.clip(row['Close_Location'] * 50.0, 10, 50))
         composite_brs_score = round(deliv_score + close_score, 2)
@@ -144,10 +107,10 @@ def run_institutional_engine():
         risk = max(entry - sl, float(row['Close']) * 0.01)
         target = round(entry + (risk * TARGET_X), 2)
 
-        deliv_pct_val = round(float(row['DeliveryPct']), 2)
-        rsi_daily_val = round(float(row['RSI_Daily']), 2)
+        deliv_pct_val = round(float(np.nan_to_num(row['DeliveryPct'], nan=0.0)), 2)
+        rsi_daily_val = round(float(np.nan_to_num(row['RSI_Daily'], nan=50.0)), 2)
 
-        sig_data = {
+        all_scored_signals.append({
             "Date": latest_date_str,
             "Symbol": symbol,
             "Timeframe": "D",
@@ -158,36 +121,18 @@ def run_institutional_engine():
             "SL": sl,
             "Target": target,
             "Close": round(float(row['Close']), 2),
-            "Volume": int(row['Volume']),
-            "EMA20": deliv_pct_val,
-            "ADX14": rsi_daily_val,
-            "DeliveryQty": int(row['DeliveryQty']),
+            "Volume": int(np.nan_to_num(row['Volume'], nan=0)),
+            "ema": deliv_pct_val,  # Map Delivery % directly to UI column
+            "adx": rsi_daily_val,  # Map Daily RSI directly to UI column
+            "DeliveryQty": int(np.nan_to_num(row['DeliveryQty'], nan=0)),
             "DeliveryPct": deliv_pct_val,
-            "DelivSpikeRatio": round(float(row['Deliv_Spike']), 2),
+            "DelivSpikeRatio": 1.0,
             "Daily_RSI": rsi_daily_val
-        }
-
-        fallback_signals.append(sig_data)
-
-        if c_mtf_monthly and c_mtf_weekly and c_daily_rsi_squeeze:
-            all_scored_signals.append(sig_data)
+        })
 
     os.makedirs("data", exist_ok=True)
+    today_df = pd.DataFrame(all_scored_signals).sort_values("BRS_Score", ascending=False).head(3) if all_scored_signals else pd.DataFrame()
 
-    # Guaranteed Top 3 Selection
-    if len(all_scored_signals) >= 3:
-        today_df = pd.DataFrame(all_scored_signals).sort_values("BRS_Score", ascending=False).head(3)
-    elif len(all_scored_signals) > 0:
-        # Fill remaining spots from fallback signals
-        df_passed = pd.DataFrame(all_scored_signals)
-        passed_symbols = df_passed['Symbol'].tolist()
-        df_fallback = pd.DataFrame(fallback_signals)
-        df_fallback = df_fallback[~df_fallback['Symbol'].isin(passed_symbols)].sort_values("BRS_Score", ascending=False)
-        today_df = pd.concat([df_passed, df_fallback], ignore_index=True).head(3)
-    else:
-        today_df = pd.DataFrame(fallback_signals).sort_values("BRS_Score", ascending=False).head(3)
-
-    # Accumulate into CSV
     if os.path.exists(SIGNALS_CSV):
         try:
             existing_df = pd.read_csv(SIGNALS_CSV)
@@ -198,15 +143,18 @@ def run_institutional_engine():
     else:
         combined_df = today_df
 
-    unique_dates = list(combined_df['Date'].unique())[:30]
-    final_export_df = combined_df[combined_df['Date'].isin(unique_dates)]
+    if not combined_df.empty:
+        combined_df['Date_DT'] = pd.to_datetime(combined_df['Date'], format="%d-%m-%Y")
+        combined_df = combined_df.sort_values(by=['Date_DT', 'BRS_Score'], ascending=[False, False])
+        recent_dates = combined_df['Date_DT'].unique()[:30]
+        final_export_df = combined_df[combined_df['Date_DT'].isin(recent_dates)].drop(columns=['Date_DT'])
+    else:
+        final_export_df = combined_df
 
     final_export_df.to_csv(SIGNALS_CSV, index=False)
-    print(f"✅ Saved Top 3 candidates for {latest_date_str}. Total stored in signals.csv: {len(final_export_df)}")
+    print(f"✅ Saved Top candidates for {latest_date_str}.")
 
-    top_candidates = today_df.to_dict('records')
-    print(f"📊 Top Candidates Dispatched ({latest_date_str}): {len(top_candidates)}")
-
+    top_candidates = today_df.to_dict('records') if not today_df.empty else []
     try:
         for sig in top_candidates:
             send_telegram_alert(sig)
@@ -216,9 +164,7 @@ def run_institutional_engine():
 
 
 def send_telegram_alert(signal: dict):
-    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
-        return
-
+    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID: return
     symbol = signal.get("Symbol")
     brs = signal.get("BRS_Score")
     setup_date = signal.get("Date")
@@ -249,40 +195,20 @@ def send_telegram_alert(signal: dict):
         f"━━━━━━━━━━━━━━━━━━━━\n"
         f"📈 <a href='{chart_url}'>View {symbol} TradingView Chart</a>"
     )
-
-    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-    payload = {
-        "chat_id": TELEGRAM_CHAT_ID,
-        "text": message,
-        "parse_mode": "HTML",
-        "disable_web_page_preview": True
-    }
-    requests.post(url, json=payload, timeout=10)
+    requests.post(f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage", json={"chat_id": TELEGRAM_CHAT_ID, "text": message, "parse_mode": "HTML", "disable_web_page_preview": True}, timeout=10)
 
 
 def send_summary_telegram(candidates: list, date_str: str):
-    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
-        return
-
-    count = len(candidates)
-
+    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID: return
     message = (
         f"🏁 <b>DAILY BRAHMASTRA SCAN COMPLETE ({date_str})</b>\n"
         f"━━━━━━━━━━━━━━━━━━━━\n"
-        f"📊 <b>Top Accumulation Candidates Found Today:</b> {count}\n\n"
-        f"🌐 <b>Interactive Web Dashboard & Full History:</b>\n"
+        f"📊 <b>Top Accumulation Candidates Found Today:</b> {len(candidates)}\n\n"
+        f"🌐 <b>Interactive Web Dashboard:</b>\n"
         f"👉 <a href='{DASHBOARD_URL}'>{DASHBOARD_URL}</a>\n"
         f"━━━━━━━━━━━━━━━━━━━━"
     )
-
-    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-    payload = {
-        "chat_id": TELEGRAM_CHAT_ID,
-        "text": message,
-        "parse_mode": "HTML",
-        "disable_web_page_preview": False
-    }
-    requests.post(url, json=payload, timeout=10)
+    requests.post(f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage", json={"chat_id": TELEGRAM_CHAT_ID, "text": message, "parse_mode": "HTML"}, timeout=10)
 
 
 if __name__ == "__main__":
