@@ -69,6 +69,11 @@ def run_90day_backfill():
 
         df = df_sym.copy().sort_values("Date_DT").reset_index(drop=True)
 
+        # Sanitize delivery and volume numericals
+        df['DeliveryQty'] = df['DeliveryQty'].fillna(0.0)
+        df['DeliveryPct'] = df['DeliveryPct'].fillna(0.0)
+        df['Volume'] = df['Volume'].fillna(0.0)
+
         # 1. Indicator Calculations
         df['RSI_Daily'] = compute_rsi(df['Close'], 14)
         df['Prev_RSI_Daily'] = df['RSI_Daily'].shift(1).fillna(df['RSI_Daily'])
@@ -121,8 +126,10 @@ def run_90day_backfill():
             risk = max(entry - sl, float(row['Close']) * 0.01)
             target = round(entry + (risk * TARGET_X), 2)
 
-            deliv_pct_val = round(float(row['DeliveryPct']), 2)
-            rsi_daily_val = round(float(row['RSI_Daily']), 2)
+            deliv_pct_val = round(float(np.nan_to_num(row['DeliveryPct'], nan=0.0)), 2)
+            deliv_qty_val = int(np.nan_to_num(row['DeliveryQty'], nan=0))
+            volume_val = int(np.nan_to_num(row['Volume'], nan=0))
+            rsi_daily_val = round(float(np.nan_to_num(row['RSI_Daily'], nan=50.0)), 2)
 
             sig_data = {
                 "Date": date_str,
@@ -135,12 +142,12 @@ def run_90day_backfill():
                 "SL": sl,
                 "Target": target,
                 "Close": round(float(row['Close']), 2),
-                "Volume": int(row['Volume']),
+                "Volume": volume_val,
                 "EMA20": deliv_pct_val,
                 "ADX14": rsi_daily_val,
-                "DeliveryQty": int(row['DeliveryQty']),
+                "DeliveryQty": deliv_qty_val,
                 "DeliveryPct": deliv_pct_val,
-                "DelivSpikeRatio": round(float(row['Deliv_Spike']), 2),
+                "DelivSpikeRatio": round(float(np.nan_to_num(row['Deliv_Spike'], nan=1.0)), 2),
                 "Daily_RSI": rsi_daily_val
             }
 
