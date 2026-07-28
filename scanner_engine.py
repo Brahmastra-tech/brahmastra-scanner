@@ -12,14 +12,27 @@ DB_PATH = "data/candles.duckdb"
 SIGNALS_CSV = "data/signals.csv"
 
 TARGET_X = 3.0  # R:R Multiple
-REJECTION_THRESHOLD_BRS = 60.0  # Calibrated Score Floor (Guarantees top 1-3 candidates)
 
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN") or os.getenv("TELEGRAM_TOKEN") or os.getenv("BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID") or os.getenv("CHAT_ID")
 DASHBOARD_URL = "https://brahmastra-tech.github.io/brahmastra-scanner/"
 
+
+def compute_rsi(series: pd.Series, period: int = 14) -> pd.Series:
+    """Calculates Wilder's Relative Strength Index (RSI)."""
+    delta = series.diff()
+    gain = delta.clip(lower=0)
+    loss = -1 * delta.clip(upper=0)
+    
+    avg_gain = gain.ewm(alpha=1/period, min_periods=period, adjust=False).mean()
+    avg_loss = loss.ewm(alpha=1/period, min_periods=period, adjust=False).mean()
+    
+    rs = avg_gain / (avg_loss + 1e-5)
+    return 100.0 - (100.0 / (1.0 + rs))
+
+
 def run_institutional_engine():
-    print("🚀 Running Institutional Breakout & Pre-Expansion Engine (IBPE-v1)...")
+    print("🚀 Running Brahmastra MTF RSI Squeeze + Leading Momentum Engine...")
 
     if not os.path.exists(DB_PATH):
         print(f"❌ Database not found at {DB_PATH}. Run bhavcopy_ingest.py first!")
@@ -27,7 +40,6 @@ def run_institutional_engine():
 
     conn = duckdb.connect(DB_PATH)
 
-    # 1. Inspect existing columns to prevent DuckDB errors
     cols_info = conn.execute("DESCRIBE ohlcv_candles").fetchall()
     existing_cols = [col[0].lower() for col in cols_info]
 
@@ -51,11 +63,6 @@ def run_institutional_engine():
     else:
         select_parts.append("45.0 AS DeliveryPct")
 
-    if "open_interest" in existing_cols:
-        select_parts.append("open_interest AS OpenInterest")
-    else:
-        select_parts.append("0.0 AS OpenInterest")
-
     query = f"""
         SELECT {', '.join(select_parts)}
         FROM ohlcv_candles
@@ -69,127 +76,135 @@ def run_institutional_engine():
         print("⚠️ No candle data found in database.")
         return
 
-    latest_date_str = pd.to_datetime(df_raw['Date'].max()).strftime("%d-%m-%Y")
+    df_raw["Date_DT"] = pd.to_datetime(df_raw["Date"])
+    latest_date_str = df_raw['Date_DT'].max().strftime("%d-%m-%Y")
     print(f"🔍 Processing Date: {latest_date_str} | Active Universe: {df_raw['Symbol'].nunique()} Securities")
 
-    # 2. Extract benchmark representation
-    nifty_df = df_raw.groupby('Date')['Close'].mean().reset_index().rename(columns={'Close': 'Close_Nifty'})
+    all_scored_signals = []
 
-    # 3. Vectorized Calculations
-    df = pd.merge(df_raw, nifty_df, on='Date', how='left')
-
-    df['EMA20'] = df.groupby('Symbol')['Close'].transform(lambda x: x.ewm(span=20, adjust=False).mean())
-    df['EMA50'] = df.groupby('Symbol')['Close'].transform(lambda x: x.ewm(span=50, adjust=False).mean())
-    df['EMA200'] = df.groupby('Symbol')['Close'].transform(lambda x: x.ewm(span=200, adjust=False).mean())
-
-    high_low = df['High'] - df['Low']
-    high_cp = (df['High'] - df.groupby('Symbol')['Close'].shift(1)).abs()
-    low_cp = (df['Low'] - df.groupby('Symbol')['Close'].shift(1)).abs()
-    tr = pd.concat([high_low, high_cp, low_cp], axis=1).max(axis=1)
-
-    df['ATR14'] = tr.groupby(df['Symbol']).transform(lambda x: x.rolling(14).mean())
-    df['ATR100'] = tr.groupby(df['Symbol']).transform(lambda x: x.rolling(100, min_periods=10).mean())
-    df['ATR_Ratio'] = df['ATR14'] / (df['ATR100'] + 1e-5)
-
-    df['STD20'] = df.groupby('Symbol')['Close'].transform(lambda x: x.rolling(20).std())
-    df['BB_Width'] = (4 * df['STD20']) / df['EMA20']
-    df['Keltner_Width'] = (3 * df['ATR14']) / df['EMA20']
-    df['Squeeze_Ratio'] = df['BB_Width'] / (df['Keltner_Width'] + 1e-5)
-
-    df['Vol_SMA20'] = df.groupby('Symbol')['Volume'].transform(lambda x: x.rolling(20).mean())
-    df['Vol_Dryup'] = df['Volume'] / (df['Vol_SMA20'] + 1e-5)
-    df['Deliv_SMA20'] = df.groupby('Symbol')['DeliveryQty'].transform(lambda x: x.rolling(20).mean())
-    df['Deliv_Spike'] = df['DeliveryQty'] / (df['Deliv_SMA20'] + 1e-5)
-
-    df['OI_Shift'] = df.groupby('Symbol')['OpenInterest'].diff()
-    df['OI_Shift_SMA20'] = df.groupby('Symbol')['OpenInterest'].transform(lambda x: x.rolling(20).mean().abs())
-    df['Price_Shift'] = df.groupby('Symbol')['Close'].diff()
-
-    df['PR'] = df['Close'] / df['Close_Nifty']
-    df['PR_SMA252'] = df.groupby('Symbol')['PR'].transform(lambda x: x.rolling(252, min_periods=10).mean())
-    df['Mansfield_RS'] = ((df['PR'] / df['PR_SMA252']) - 1) * 100
-
-    # 4. Evaluate setup across latest bars
-    latest_bar = df[df['Date'] == df['Date'].max()].copy()
-    all_signals = []
-
-    for _, row in latest_bar.iterrows():
-        symbol = row['Symbol']
-
-        # Layer 1: Liquidity Filter
-        if row['Volume'] < 200000:
+    for symbol, df_sym in df_raw.groupby('Symbol'):
+        if len(df_sym) < 45:
             continue
 
-        # Layer 2: Calibrated Stage 2B Classification
-        is_ema_aligned = row['Close'] > row['EMA50']  # Baseline trend
-        is_volatility_compressed = (row['Squeeze_Ratio'] <= 1.25) or (row['ATR_Ratio'] <= 0.85)
+        df = df_sym.copy().sort_values("Date_DT").reset_index(drop=True)
 
-        if not (is_ema_aligned and is_volatility_compressed):
+        # -------------------------------------------------------------
+        # 1. DAILY & MULTI-TIMEFRAME RSI CALCULATIONS
+        # -------------------------------------------------------------
+        df['RSI_Daily'] = compute_rsi(df['Close'], 14)
+        df['Prev_RSI_Daily'] = df['RSI_Daily'].shift(1)
+
+        # Resample to Weekly and Monthly to extract MTF RSI trends
+        df_weekly = df.set_index('Date_DT').resample('W-FRI').agg({'Close': 'last'}).dropna()
+        df_weekly['RSI_Weekly'] = compute_rsi(df_weekly['Close'], 14)
+        df_weekly['Prev_RSI_Weekly'] = df_weekly['RSI_Weekly'].shift(1)
+
+        df_monthly = df.set_index('Date_DT').resample('ME').agg({'Close': 'last'}).dropna()
+        df_monthly['RSI_Monthly'] = compute_rsi(df_monthly['Close'], 14)
+        df_monthly['Prev_RSI_Monthly'] = df_monthly['RSI_Monthly'].shift(1)
+
+        # Merge MTF RSIs back onto daily dataframe
+        df = pd.merge_asof(df, df_weekly[['RSI_Weekly', 'Prev_RSI_Weekly']], on='Date_DT', direction='backward')
+        df = pd.merge_asof(df, df_monthly[['RSI_Monthly', 'Prev_RSI_Monthly']], on='Date_DT', direction='backward')
+
+        # -------------------------------------------------------------
+        # 2. LEADING MOMENTUM & VOLUME PROFILE INDICATORS
+        # -------------------------------------------------------------
+        # Volume-Weighted RSI (VRSI)
+        df['Vol_Weight'] = df['Volume'] / df['Volume'].rolling(20).mean()
+        df['VRSI'] = df['RSI_Daily'] * df['Vol_Weight']
+        df['VRSI_Slope'] = df['VRSI'] - df['VRSI'].shift(2)
+
+        # Delivery Absorption Spike
+        df['Deliv_SMA20'] = df['DeliveryQty'].rolling(20).mean()
+        df['Deliv_Spike'] = df['DeliveryQty'] / (df['Deliv_SMA20'] + 1e-5)
+
+        # Range Squeeze & Liquidity Reversal
+        df['Day_Range'] = df['High'] - df['Low']
+        df['Range_Pct'] = df['Day_Range'] / df['Close']
+        df['Close_Location'] = (df['Close'] - df['Low']) / (df['Day_Range'] + 1e-5)  # 1.0 = High, 0.0 = Low
+
+        # Evaluate the latest daily bar
+        row = df.iloc[-1]
+
+        # -------------------------------------------------------------
+        # 3. FILTERING & SCORING LOGIC
+        # -------------------------------------------------------------
+        # Chartink MTF RSI Squeeze Conditions:
+        # - Monthly RSI rising
+        # - Weekly RSI rising
+        # - Daily RSI consolidating (within +/- 2% of yesterday)
+        c_mtf_monthly = row['RSI_Monthly'] > row['Prev_RSI_Monthly'] if pd.notna(row['RSI_Monthly']) else True
+        c_mtf_weekly = row['RSI_Weekly'] > row['Prev_RSI_Weekly'] if pd.notna(row['RSI_Weekly']) else True
+        
+        rsi_daily_diff = abs(row['RSI_Daily'] - row['Prev_RSI_Daily'])
+        c_daily_rsi_squeeze = rsi_daily_diff <= 2.5  # Daily RSI Flatline
+
+        # Institutional Delivery & Volume Filter:
+        c_deliv_ok = row['DeliveryPct'] >= 40.0
+        c_vol_ok = row['Volume'] >= 200000
+
+        # Base Eligibility Check
+        if not (c_mtf_monthly and c_mtf_weekly and c_vol_ok):
             continue
 
-        stage = "STAGE 2B: BREAKOUT READY"
+        # Composite Scoring Engine (0 to 100)
+        score_rsi_squeeze = np.clip((2.5 - rsi_daily_diff) / 2.5 * 25, 0, 25)
+        score_leading_vrsi = np.clip(row['VRSI_Slope'] * 5.0, 0, 25) if row['VRSI_Slope'] > 0 else 5.0
+        score_delivery = np.clip((row['DeliveryPct'] / 70.0 * 15) + (row['Deliv_Spike'] / 2.0 * 15), 0, 30)
+        score_close_strength = np.clip(row['Close_Location'] * 20.0, 0, 20)
 
-        # Layer 3 & 4: Delivery Absorption
-        if row['DeliveryPct'] < 35.0:
-            continue
+        composite_brs_score = round(score_rsi_squeeze + score_leading_vrsi + score_delivery + score_close_strength, 2)
 
-        # Layer 5: Institutional BRS Scoring Engine
-        s_vcp = np.clip((1.25 - row['Squeeze_Ratio']) / (1.25 - 0.5) * 100, 0, 100)
-        s_deliv = np.clip((row['DeliveryPct'] / 65.0 * 50) + (row['Deliv_Spike'] / 1.5 * 50), 0, 100)
-        s_oi = 75.0 if row['Price_Shift'] > 0 else 40.0
-        s_rs = np.clip((row['Mansfield_RS'] - (-5)) / (10 - (-5)) * 100, 0, 100)
-        s_vp = 100 if row['Vol_Dryup'] <= 0.80 else 50
-
-        brs_score = round((0.25 * s_vcp) + (0.20 * s_deliv) + (0.20 * s_oi) + (0.15 * s_rs) + (0.20 * s_vp), 2)
-
-        # Apply Score Threshold
-        if brs_score < REJECTION_THRESHOLD_BRS:
-            continue
-
-        entry = round(row['High'], 2)
-        sl = round(row['Low'], 2)
+        entry = round(float(row['High']), 2)
+        sl = round(float(row['Low']), 2)
         target = round(entry + (entry - sl) * TARGET_X, 2)
 
-        all_signals.append({
+        all_scored_signals.append({
             "Date": latest_date_str,
             "Symbol": symbol,
             "Timeframe": "D",
             "Type": "PRE_BREAKOUT",
-            "Pattern": stage,
-            "BRS_Score": brs_score,
+            "Pattern": "MTF_RSI_ACCUMULATION",
+            "BRS_Score": composite_brs_score,
             "Entry": entry,
             "SL": sl,
             "Target": target,
-            "Close": round(row['Close'], 2),
+            "Close": round(float(row['Close']), 2),
             "Volume": int(row['Volume']),
             "DeliveryQty": int(row['DeliveryQty']),
-            "DeliveryPct": round(row['DeliveryPct'], 2),
-            "DelivSpikeRatio": round(row['Deliv_Spike'], 2),
-            "Mansfield_RS": round(row['Mansfield_RS'], 2)
+            "DeliveryPct": round(float(row['DeliveryPct']), 2),
+            "DelivSpikeRatio": round(float(row['Deliv_Spike']), 2),
+            "Daily_RSI": round(float(row['RSI_Daily']), 2)
         })
 
     os.makedirs("data", exist_ok=True)
 
-    if all_signals:
-        export_df = pd.DataFrame(all_signals).sort_values("BRS_Score", ascending=False)
+    # -------------------------------------------------------------
+    # 4. GUARANTEED TOP CANDIDATES SELECTION & DISPATCH
+    # -------------------------------------------------------------
+    if all_scored_signals:
+        export_df = pd.DataFrame(all_scored_signals).sort_values("BRS_Score", ascending=False)
     else:
         export_df = pd.DataFrame(columns=[
             'Date', 'Symbol', 'Timeframe', 'Type', 'Pattern', 'BRS_Score',
             'Entry', 'SL', 'Target', 'Close', 'Volume', 'DeliveryQty',
-            'DeliveryPct', 'DelivSpikeRatio', 'Mansfield_RS'
+            'DeliveryPct', 'DelivSpikeRatio', 'Daily_RSI'
         ])
 
     export_df.to_csv(SIGNALS_CSV, index=False)
-    print(f"✅ Saved {len(export_df)} Elite Stage 2B candidates to {SIGNALS_CSV}.")
+    print(f"✅ Saved {len(export_df)} total evaluated candidates to {SIGNALS_CSV}.")
 
-    today_candidates = export_df.to_dict('records')
+    # Pick the Top 3 scored candidates for Telegram dispatch
+    top_candidates = export_df.head(3).to_dict('records')
+    print(f"📊 Top Ranked Candidates Selected for Today ({latest_date_str}): {len(top_candidates)}")
 
     try:
-        for sig in today_candidates[:3]:
+        for sig in top_candidates:
             send_telegram_alert(sig)
             time.sleep(0.5)
     finally:
-        send_summary_telegram(today_candidates, latest_date_str)
+        send_summary_telegram(top_candidates, latest_date_str)
 
 
 def send_telegram_alert(signal: dict):
@@ -204,25 +219,25 @@ def send_telegram_alert(signal: dict):
     target = signal.get("Target")
     close = signal.get("Close")
     deliv_pct = signal.get("DeliveryPct", 0.0)
-    rs_val = signal.get("Mansfield_RS", 0.0)
+    rsi_val = signal.get("Daily_RSI", 0.0)
 
     chart_url = f"https://in.tradingview.com/chart/?symbol=NSE:{symbol}"
 
     message = (
-        f"🏛️ <b>INSTITUTIONAL BREAKOUT CANDIDATE</b>\n"
+        f"🏛️ <b>BRAHMASTRA ACCUMULATION CANDIDATE</b>\n"
         f"━━━━━━━━━━━━━━━━━━━━\n"
         f"📈 <b>Stock:</b> {symbol} (NSE F&O)\n"
-        f"⭐ <b>BRS Score:</b> {brs} / 100\n"
-        f"🎯 <b>Stage:</b> Stage 2B (Breakout Ready)\n"
+        f"⭐ <b>BRS Score:</b> {brs:.1f} / 100\n"
+        f"🎯 <b>Setup:</b> MTF RSI Squeeze + Delivery Absorption\n"
         f"⏱ <b>Date:</b> {setup_date}\n\n"
         f"📊 <b>ACTIONABLE TRIGGER LEVELS</b>\n"
-        f"• <b>Trigger Entry Price :</b> ₹{entry:.2f}\n"
+        f"• <b>Trigger Buy Above   :</b> ₹{entry:.2f}\n"
         f"• <b>Stop Loss           :</b> ₹{sl:.2f}\n"
-        f"• <b>Target (3x)         :</b> ₹{target:.2f}\n"
+        f"• <b>Target (3x R:R)     :</b> ₹{target:.2f}\n"
         f"• <b>Today's Close       :</b> ₹{close:.2f}\n\n"
-        f"⚡ <b>INSTITUTIONAL METRICS</b>\n"
+        f"⚡ <b>ACCUMULATION METRICS</b>\n"
         f"• <b>Delivery %          :</b> {deliv_pct:.1f}%\n"
-        f"• <b>Mansfield RS Alpha  :</b> +{rs_val:.2f}\n"
+        f"• <b>Daily RSI           :</b> {rsi_val:.1f} (Consolidating)\n"
         f"━━━━━━━━━━━━━━━━━━━━\n"
         f"📈 <a href='{chart_url}'>View {symbol} TradingView Chart</a>"
     )
@@ -241,11 +256,13 @@ def send_summary_telegram(candidates: list, date_str: str):
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
         return
 
+    count = len(candidates)
+
     message = (
-        f"🏁 <b>INSTITUTIONAL ENGINE EXECUTION COMPLETE ({date_str})</b>\n"
+        f"🏁 <b>DAILY BRAHMASTRA SCAN COMPLETE ({date_str})</b>\n"
         f"━━━━━━━━━━━━━━━━━━━━\n"
-        f"📊 <b>Stage 2B Qualified Candidates:</b> {len(candidates)}\n\n"
-        f"🌐 <b>Interactive Web Dashboard:</b>\n"
+        f"📊 <b>Top Accumulation Candidates Found Today:</b> {count}\n\n"
+        f"🌐 <b>Interactive Web Dashboard & Full History:</b>\n"
         f"👉 <a href='{DASHBOARD_URL}'>{DASHBOARD_URL}</a>\n"
         f"━━━━━━━━━━━━━━━━━━━━"
     )
