@@ -19,7 +19,7 @@ DASHBOARD_URL = "https://brahmastra-tech.github.io/brahmastra-scanner/"
 
 
 def compute_rsi(series: pd.Series, period: int = 14) -> pd.Series:
-    """Calculates Wilder's RSI safely without division by zero."""
+    """Calculates Wilder's RSI safely without division by zero or NaN propagation."""
     delta = series.diff()
     gain = delta.clip(lower=0)
     loss = -1 * delta.clip(upper=0)
@@ -177,8 +177,11 @@ def run_institutional_engine():
 
     os.makedirs("data", exist_ok=True)
 
+    # -------------------------------------------------------------
+    # RESTRICTIVE EXPORT: Save Top 3 Candidates Only to signals.csv
+    # -------------------------------------------------------------
     if all_scored_signals:
-        export_df = pd.DataFrame(all_scored_signals).sort_values("BRS_Score", ascending=False)
+        export_df = pd.DataFrame(all_scored_signals).sort_values("BRS_Score", ascending=False).head(3)
     else:
         export_df = pd.DataFrame(columns=[
             'Date', 'Symbol', 'Timeframe', 'Type', 'Pattern', 'BRS_Score',
@@ -187,9 +190,9 @@ def run_institutional_engine():
         ])
 
     export_df.to_csv(SIGNALS_CSV, index=False)
-    print(f"✅ Saved {len(export_df)} evaluated pre-breakout candidates to {SIGNALS_CSV}.")
+    print(f"✅ Saved Top {len(export_df)} pre-breakout candidates to {SIGNALS_CSV}.")
 
-    top_candidates = export_df.head(3).to_dict('records')
+    top_candidates = export_df.to_dict('records')
     print(f"📊 Top Ranked Candidates Selected for Today ({latest_date_str}): {len(top_candidates)}")
 
     try:
