@@ -30,7 +30,6 @@ def init_and_migrate_db(conn):
         );
     """)
 
-    # Safe migrations
     conn.execute("ALTER TABLE ohlcv_candles ADD COLUMN IF NOT EXISTS timeframe VARCHAR DEFAULT 'D';")
     conn.execute("ALTER TABLE ohlcv_candles ADD COLUMN IF NOT EXISTS delivery_qty DOUBLE;")
     conn.execute("ALTER TABLE ohlcv_candles ADD COLUMN IF NOT EXISTS delivery_pct DOUBLE;")
@@ -43,7 +42,7 @@ def fetch_nse_bhavcopy(target_date: datetime):
     url = f"https://archives.nseindia.com/products/content/sec_bhavdata_full_{date_str}.csv"
     
     try:
-        response = requests.get(url, headers=HEADERS, timeout=15)
+        response = requests.get(url, headers=HEADERS, timeout=10)
         if response.status_code == 200:
             df = pd.read_csv(io.StringIO(response.text))
             df.columns = df.columns.str.strip()
@@ -51,24 +50,24 @@ def fetch_nse_bhavcopy(target_date: datetime):
         else:
             return None
     except Exception as e:
-        print(f"❌ Error downloading Bhavcopy for {target_date.strftime('%Y-%m-%d')}: {e}")
         return None
 
 
 def process_and_store():
     os.makedirs("data", exist_ok=True)
     conn = duckdb.connect(DB_PATH)
-    
-    # Ensure DuckDB table schema has all necessary columns
     init_and_migrate_db(conn)
 
-    # Inspect existing DuckDB table columns dynamically
     db_cols_info = conn.execute("DESCRIBE ohlcv_candles").fetchall()
     target_table_cols = [col[0].lower() for col in db_cols_info]
 
     today = datetime.now()
-    # Ingest missing trailing trading sessions
-    for i in range(10, -1, -1):
+    
+    # FETCH LAST 60 CALENDAR DAYS TO SEED ENTIRE 40+ TRADING DAY HISTORY
+    print("📥 Ingesting trailing 60 days of NSE Bhavcopy data into DuckDB...")
+    ingested_count = 0
+
+    for i in range(60, -1, -1):
         target_date = today - timedelta(days=i)
         
         if target_date.weekday() >= 5:  # Skip weekends
@@ -76,11 +75,11 @@ def process_and_store():
 
         date_db_format = target_date.strftime("%Y-%m-%d")
         
+        # Check if already present
         existing = conn.execute("SELECT COUNT(*) FROM ohlcv_candles WHERE timestamp = ?", [date_db_format]).fetchone()[0]
         if existing > 0:
             continue
 
-        print(f"📥 Fetching NSE Bhavcopy for {date_db_format}...")
         df_raw = fetch_nse_bhavcopy(target_date)
 
         if df_raw is None or df_raw.empty:
@@ -92,7 +91,6 @@ def process_and_store():
         if df_eq.empty:
             continue
 
-        # Build clean DataFrame with all potential database fields
         df_eq['symbol'] = df_eq['SYMBOL'].astype(str).str.strip()
         df_eq['timestamp'] = pd.to_datetime(df_eq['DATE1'].astype(str).str.strip(), format="%d-%b-%Y").dt.strftime("%Y-%m-%d")
         df_eq['timeframe'] = 'D'
@@ -109,21 +107,21 @@ def process_and_store():
         else:
             df_eq['open_interest'] = 0.0
 
-        # Match columns strictly to what exists in the DuckDB table
         insert_cols = [col for col in target_table_cols if col in df_eq.columns]
-        
         final_df = df_eq[insert_cols].dropna(subset=['symbol', 'close'])
 
         col_names_str = ", ".join(insert_cols)
         
-        # Dynamic SQL query guarantees column and constraint alignment
         query = f"""
             INSERT OR REPLACE INTO ohlcv_candles ({col_names_str})
             SELECT {col_names_str} FROM final_df
         """
         conn.execute(query)
-        print(f"✅ Ingested {len(final_df)} securities for {date_db_format}.")
+        ingested_count += 1
+        print(f"  └─ Ingested {date_db_format} ({len(final_df)} symbols)")
 
+    total_rows = conn.execute("SELECT COUNT(*) FROM ohlcv_candles").fetchone()[0]
+    print(f"✅ Ingestion Complete! Total DB Candle Rows: {total_rows}")
     conn.close()
 
 
