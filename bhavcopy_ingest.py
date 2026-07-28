@@ -20,6 +20,7 @@ def init_and_migrate_db(conn):
         CREATE TABLE IF NOT EXISTS ohlcv_candles (
             symbol VARCHAR,
             timestamp DATE,
+            timeframe VARCHAR DEFAULT 'D',
             open DOUBLE,
             high DOUBLE,
             low DOUBLE,
@@ -30,6 +31,7 @@ def init_and_migrate_db(conn):
     """)
 
     # Safe migrations
+    conn.execute("ALTER TABLE ohlcv_candles ADD COLUMN IF NOT EXISTS timeframe VARCHAR DEFAULT 'D';")
     conn.execute("ALTER TABLE ohlcv_candles ADD COLUMN IF NOT EXISTS delivery_qty DOUBLE;")
     conn.execute("ALTER TABLE ohlcv_candles ADD COLUMN IF NOT EXISTS delivery_pct DOUBLE;")
     conn.execute("ALTER TABLE ohlcv_candles ADD COLUMN IF NOT EXISTS open_interest DOUBLE;")
@@ -57,8 +59,12 @@ def process_and_store():
     os.makedirs("data", exist_ok=True)
     conn = duckdb.connect(DB_PATH)
     
-    # Ensure DuckDB table schema is ready
+    # Ensure DuckDB table schema has all necessary columns
     init_and_migrate_db(conn)
+
+    # Inspect existing DuckDB table columns dynamically
+    db_cols_info = conn.execute("DESCRIBE ohlcv_candles").fetchall()
+    target_table_cols = [col[0].lower() for col in db_cols_info]
 
     today = datetime.now()
     # Ingest missing trailing trading sessions
@@ -86,8 +92,10 @@ def process_and_store():
         if df_eq.empty:
             continue
 
+        # Build clean DataFrame with all potential database fields
         df_eq['symbol'] = df_eq['SYMBOL'].astype(str).str.strip()
         df_eq['timestamp'] = pd.to_datetime(df_eq['DATE1'].astype(str).str.strip(), format="%d-%b-%Y").dt.strftime("%Y-%m-%d")
+        df_eq['timeframe'] = 'D'
         df_eq['open'] = pd.to_numeric(df_eq['OPEN_PRICE'], errors='coerce')
         df_eq['high'] = pd.to_numeric(df_eq['HIGH_PRICE'], errors='coerce')
         df_eq['low'] = pd.to_numeric(df_eq['LOW_PRICE'], errors='coerce')
@@ -96,28 +104,24 @@ def process_and_store():
         df_eq['delivery_qty'] = pd.to_numeric(df_eq['DELIV_QTY'], errors='coerce').fillna(0.0)
         df_eq['delivery_pct'] = pd.to_numeric(df_eq['DELIV_PER'], errors='coerce').fillna(0.0)
         
-        # Safely assign open_interest without AttributeError
         if 'OPEN_INT' in df_eq.columns:
             df_eq['open_interest'] = pd.to_numeric(df_eq['OPEN_INT'], errors='coerce').fillna(0.0)
         else:
             df_eq['open_interest'] = 0.0
 
-        final_df = df_eq[[
-            'symbol', 'timestamp', 'open', 'high', 'low', 'close', 
-            'volume', 'delivery_qty', 'delivery_pct', 'open_interest'
-        ]].dropna(subset=['symbol', 'close'])
+        # Match columns strictly to what exists in the DuckDB table
+        insert_cols = [col for col in target_table_cols if col in df_eq.columns]
+        
+        final_df = df_eq[insert_cols].dropna(subset=['symbol', 'close'])
 
-        # Explicit column mapping insertion
-        conn.execute("""
-            INSERT OR REPLACE INTO ohlcv_candles (
-                symbol, timestamp, open, high, low, close, 
-                volume, delivery_qty, delivery_pct, open_interest
-            )
-            SELECT 
-                symbol, timestamp, open, high, low, close, 
-                volume, delivery_qty, delivery_pct, open_interest
-            FROM final_df
-        """)
+        col_names_str = ", ".join(insert_cols)
+        
+        # Dynamic SQL query guarantees column and constraint alignment
+        query = f"""
+            INSERT OR REPLACE INTO ohlcv_candles ({col_names_str})
+            SELECT {col_names_str} FROM final_df
+        """
+        conn.execute(query)
         print(f"✅ Ingested {len(final_df)} securities for {date_db_format}.")
 
     conn.close()
