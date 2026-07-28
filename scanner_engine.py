@@ -19,7 +19,7 @@ DASHBOARD_URL = "https://brahmastra-tech.github.io/brahmastra-scanner/"
 
 
 def compute_rsi(series: pd.Series, period: int = 14) -> pd.Series:
-    """Calculates Wilder's Relative Strength Index (RSI)."""
+    """Calculates Wilder's RSI safely without division by zero."""
     delta = series.diff()
     gain = delta.clip(lower=0)
     loss = -1 * delta.clip(upper=0)
@@ -28,11 +28,12 @@ def compute_rsi(series: pd.Series, period: int = 14) -> pd.Series:
     avg_loss = loss.ewm(alpha=1/period, min_periods=period, adjust=False).mean()
     
     rs = avg_gain / (avg_loss + 1e-5)
-    return 100.0 - (100.0 / (1.0 + rs))
+    rsi = 100.0 - (100.0 / (1.0 + rs))
+    return rsi.fillna(50.0)
 
 
 def run_institutional_engine():
-    print("🚀 Running Brahmastra MTF RSI Squeeze + Leading Momentum Engine...")
+    print("🚀 Running Fixed Brahmastra Pre-Breakout RSI Engine...")
 
     if not os.path.exists(DB_PATH):
         print(f"❌ Database not found at {DB_PATH}. Run bhavcopy_ingest.py first!")
@@ -40,6 +41,7 @@ def run_institutional_engine():
 
     conn = duckdb.connect(DB_PATH)
 
+    # Inspect columns dynamically
     cols_info = conn.execute("DESCRIBE ohlcv_candles").fetchall()
     existing_cols = [col[0].lower() for col in cols_info]
 
@@ -83,82 +85,77 @@ def run_institutional_engine():
     all_scored_signals = []
 
     for symbol, df_sym in df_raw.groupby('Symbol'):
-        if len(df_sym) < 45:
+        if len(df_sym) < 30:
             continue
 
         df = df_sym.copy().sort_values("Date_DT").reset_index(drop=True)
 
-        # -------------------------------------------------------------
-        # 1. DAILY & MULTI-TIMEFRAME RSI CALCULATIONS
-        # -------------------------------------------------------------
+        # 1. Daily RSI & Safe Shifts
         df['RSI_Daily'] = compute_rsi(df['Close'], 14)
-        df['Prev_RSI_Daily'] = df['RSI_Daily'].shift(1)
+        df['Prev_RSI_Daily'] = df['RSI_Daily'].shift(1).fillna(df['RSI_Daily'])
 
-        # Resample to Weekly and Monthly to extract MTF RSI trends
+        # 2. Resample Weekly & Monthly with Fallbacks for Short Data History
         df_weekly = df.set_index('Date_DT').resample('W-FRI').agg({'Close': 'last'}).dropna()
-        df_weekly['RSI_Weekly'] = compute_rsi(df_weekly['Close'], 14)
-        df_weekly['Prev_RSI_Weekly'] = df_weekly['RSI_Weekly'].shift(1)
+        if len(df_weekly) >= 15:
+            df_weekly['RSI_Weekly'] = compute_rsi(df_weekly['Close'], 14)
+            df_weekly['Prev_RSI_Weekly'] = df_weekly['RSI_Weekly'].shift(1).fillna(df_weekly['RSI_Weekly'])
+        else:
+            df_weekly['RSI_Weekly'] = 55.0
+            df_weekly['Prev_RSI_Weekly'] = 50.0
 
         df_monthly = df.set_index('Date_DT').resample('ME').agg({'Close': 'last'}).dropna()
-        df_monthly['RSI_Monthly'] = compute_rsi(df_monthly['Close'], 14)
-        df_monthly['Prev_RSI_Monthly'] = df_monthly['RSI_Monthly'].shift(1)
+        if len(df_monthly) >= 15:
+            df_monthly['RSI_Monthly'] = compute_rsi(df_monthly['Close'], 14)
+            df_monthly['Prev_RSI_Monthly'] = df_monthly['RSI_Monthly'].shift(1).fillna(df_monthly['RSI_Monthly'])
+        else:
+            df_monthly['RSI_Monthly'] = 55.0
+            df_monthly['Prev_RSI_Monthly'] = 50.0
 
-        # Merge MTF RSIs back onto daily dataframe
+        # Merge MTF RSIs cleanly
         df = pd.merge_asof(df, df_weekly[['RSI_Weekly', 'Prev_RSI_Weekly']], on='Date_DT', direction='backward')
         df = pd.merge_asof(df, df_monthly[['RSI_Monthly', 'Prev_RSI_Monthly']], on='Date_DT', direction='backward')
 
-        # -------------------------------------------------------------
-        # 2. LEADING MOMENTUM & VOLUME PROFILE INDICATORS
-        # -------------------------------------------------------------
-        # Volume-Weighted RSI (VRSI)
-        df['Vol_Weight'] = df['Volume'] / df['Volume'].rolling(20).mean()
-        df['VRSI'] = df['RSI_Daily'] * df['Vol_Weight']
-        df['VRSI_Slope'] = df['VRSI'] - df['VRSI'].shift(2)
+        df['RSI_Weekly'] = df['RSI_Weekly'].fillna(55.0)
+        df['Prev_RSI_Weekly'] = df['Prev_RSI_Weekly'].fillna(50.0)
+        df['RSI_Monthly'] = df['RSI_Monthly'].fillna(55.0)
+        df['Prev_RSI_Monthly'] = df['Prev_RSI_Monthly'].fillna(50.0)
 
-        # Delivery Absorption Spike
-        df['Deliv_SMA20'] = df['DeliveryQty'].rolling(20).mean()
-        df['Deliv_Spike'] = df['DeliveryQty'] / (df['Deliv_SMA20'] + 1e-5)
+        # 3. Volume & Delivery Metrics
+        df['Vol_SMA20'] = df['Volume'].rolling(20, min_periods=5).mean().fillna(df['Volume'])
+        df['Deliv_SMA20'] = df['DeliveryQty'].rolling(20, min_periods=5).mean().fillna(df['DeliveryQty'])
+        df['Deliv_Spike'] = (df['DeliveryQty'] / (df['Deliv_SMA20'] + 1e-5)).fillna(1.0)
 
-        # Range Squeeze & Liquidity Reversal
-        df['Day_Range'] = df['High'] - df['Low']
-        df['Range_Pct'] = df['Day_Range'] / df['Close']
-        df['Close_Location'] = (df['Close'] - df['Low']) / (df['Day_Range'] + 1e-5)  # 1.0 = High, 0.0 = Low
+        df['Day_Range'] = (df['High'] - df['Low']).clip(lower=1e-5)
+        df['Close_Location'] = ((df['Close'] - df['Low']) / df['Day_Range']).fillna(0.5)
 
-        # Evaluate the latest daily bar
+        # Target the latest bar for PRE-BREAKOUT identification
         row = df.iloc[-1]
 
-        # -------------------------------------------------------------
-        # 3. FILTERING & SCORING LOGIC
-        # -------------------------------------------------------------
-        # Chartink MTF RSI Squeeze Conditions:
-        # - Monthly RSI rising
-        # - Weekly RSI rising
-        # - Daily RSI consolidating (within +/- 2% of yesterday)
-        c_mtf_monthly = row['RSI_Monthly'] > row['Prev_RSI_Monthly'] if pd.notna(row['RSI_Monthly']) else True
-        c_mtf_weekly = row['RSI_Weekly'] > row['Prev_RSI_Weekly'] if pd.notna(row['RSI_Weekly']) else True
+        # Chartink Core Filters
+        c_mtf_monthly = row['RSI_Monthly'] >= row['Prev_RSI_Monthly']
+        c_mtf_weekly = row['RSI_Weekly'] >= row['Prev_RSI_Weekly']
         
-        rsi_daily_diff = abs(row['RSI_Daily'] - row['Prev_RSI_Daily'])
-        c_daily_rsi_squeeze = rsi_daily_diff <= 2.5  # Daily RSI Flatline
+        rsi_diff = abs(row['RSI_Daily'] - row['Prev_RSI_Daily'])
+        c_daily_rsi_squeeze = rsi_diff <= 3.0  # RSI Flatline (Consolidation)
 
-        # Institutional Delivery & Volume Filter:
-        c_deliv_ok = row['DeliveryPct'] >= 40.0
-        c_vol_ok = row['Volume'] >= 200000
+        c_vol_ok = row['Volume'] >= 150000
 
-        # Base Eligibility Check
         if not (c_mtf_monthly and c_mtf_weekly and c_vol_ok):
             continue
 
-        # Composite Scoring Engine (0 to 100)
-        score_rsi_squeeze = np.clip((2.5 - rsi_daily_diff) / 2.5 * 25, 0, 25)
-        score_leading_vrsi = np.clip(row['VRSI_Slope'] * 5.0, 0, 25) if row['VRSI_Slope'] > 0 else 5.0
-        score_delivery = np.clip((row['DeliveryPct'] / 70.0 * 15) + (row['Deliv_Spike'] / 2.0 * 15), 0, 30)
-        score_close_strength = np.clip(row['Close_Location'] * 20.0, 0, 20)
+        # Safe NaN-proof BRS Calculations
+        s_rsi_squeeze = float(np.clip((3.0 - rsi_diff) / 3.0 * 30.0, 0, 30))
+        s_delivery = float(np.clip((row['DeliveryPct'] / 70.0 * 20.0) + (row['Deliv_Spike'] / 2.0 * 20.0), 0, 40))
+        s_close_loc = float(np.clip(row['Close_Location'] * 30.0, 0, 30))
 
-        composite_brs_score = round(score_rsi_squeeze + score_leading_vrsi + score_delivery + score_close_strength, 2)
+        composite_brs = float(np.nan_to_num(s_rsi_squeeze + s_delivery + s_close_loc, nan=50.0))
+        composite_brs_score = round(composite_brs, 2)
 
-        entry = round(float(row['High']), 2)
+        # Trigger Buy is placed ABOVE the consolidation bar High (Catching breakout 1-2 days before expansion)
+        entry = round(float(row['High']) + 0.05, 2)
         sl = round(float(row['Low']), 2)
-        target = round(entry + (entry - sl) * TARGET_X, 2)
+        risk = max(entry - sl, float(row['Close']) * 0.01)
+        target = round(entry + (risk * TARGET_X), 2)
 
         all_scored_signals.append({
             "Date": latest_date_str,
@@ -180,9 +177,6 @@ def run_institutional_engine():
 
     os.makedirs("data", exist_ok=True)
 
-    # -------------------------------------------------------------
-    # 4. GUARANTEED TOP CANDIDATES SELECTION & DISPATCH
-    # -------------------------------------------------------------
     if all_scored_signals:
         export_df = pd.DataFrame(all_scored_signals).sort_values("BRS_Score", ascending=False)
     else:
@@ -193,9 +187,8 @@ def run_institutional_engine():
         ])
 
     export_df.to_csv(SIGNALS_CSV, index=False)
-    print(f"✅ Saved {len(export_df)} total evaluated candidates to {SIGNALS_CSV}.")
+    print(f"✅ Saved {len(export_df)} evaluated pre-breakout candidates to {SIGNALS_CSV}.")
 
-    # Pick the Top 3 scored candidates for Telegram dispatch
     top_candidates = export_df.head(3).to_dict('records')
     print(f"📊 Top Ranked Candidates Selected for Today ({latest_date_str}): {len(top_candidates)}")
 
@@ -224,10 +217,10 @@ def send_telegram_alert(signal: dict):
     chart_url = f"https://in.tradingview.com/chart/?symbol=NSE:{symbol}"
 
     message = (
-        f"🏛️ <b>BRAHMASTRA ACCUMULATION CANDIDATE</b>\n"
+        f"🏛️ <b>BRAHMASTRA PRE-BREAKOUT WATCHLIST</b>\n"
         f"━━━━━━━━━━━━━━━━━━━━\n"
         f"📈 <b>Stock:</b> {symbol} (NSE F&O)\n"
-        f"⭐ <b>BRS Score:</b> {brs:.1f} / 100\n"
+        f"⭐ <b>BRS Score:</b> {brs:.2f} / 100\n"
         f"🎯 <b>Setup:</b> MTF RSI Squeeze + Delivery Absorption\n"
         f"⏱ <b>Date:</b> {setup_date}\n\n"
         f"📊 <b>ACTIONABLE TRIGGER LEVELS</b>\n"
