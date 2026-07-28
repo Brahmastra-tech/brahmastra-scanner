@@ -41,7 +41,6 @@ def run_institutional_engine():
 
     conn = duckdb.connect(DB_PATH)
 
-    # Inspect table columns dynamically
     cols_info = conn.execute("DESCRIBE ohlcv_candles").fetchall()
     existing_cols = [col[0].lower() for col in cols_info]
 
@@ -83,20 +82,21 @@ def run_institutional_engine():
     print(f"🔍 Processing Date: {latest_date_str} | Active Universe: {df_raw['Symbol'].nunique()} Securities")
 
     all_scored_signals = []
+    fallback_signals = []
 
     for symbol, df_sym in df_raw.groupby('Symbol'):
-        if len(df_sym) < 20:
+        if len(df_sym) < 15:
             continue
 
         df = df_sym.copy().sort_values("Date_DT").reset_index(drop=True)
 
-        # 1. Daily RSI & Safe Shifts
+        # 1. Daily RSI
         df['RSI_Daily'] = compute_rsi(df['Close'], 14)
         df['Prev_RSI_Daily'] = df['RSI_Daily'].shift(1).fillna(df['RSI_Daily'])
 
-        # 2. Resample Weekly & Monthly with Fallbacks
+        # 2. Resample Weekly & Monthly
         df_weekly = df.set_index('Date_DT').resample('W-FRI').agg({'Close': 'last'}).dropna()
-        if len(df_weekly) >= 14:
+        if len(df_weekly) >= 5:
             df_weekly['RSI_Weekly'] = compute_rsi(df_weekly['Close'], 14)
             df_weekly['Prev_RSI_Weekly'] = df_weekly['RSI_Weekly'].shift(1).fillna(df_weekly['RSI_Weekly'])
         else:
@@ -104,14 +104,13 @@ def run_institutional_engine():
             df_weekly['Prev_RSI_Weekly'] = 50.0
 
         df_monthly = df.set_index('Date_DT').resample('ME').agg({'Close': 'last'}).dropna()
-        if len(df_monthly) >= 14:
+        if len(df_monthly) >= 2:
             df_monthly['RSI_Monthly'] = compute_rsi(df_monthly['Close'], 14)
             df_monthly['Prev_RSI_Monthly'] = df_monthly['RSI_Monthly'].shift(1).fillna(df_monthly['RSI_Monthly'])
         else:
             df_monthly['RSI_Monthly'] = 55.0
             df_monthly['Prev_RSI_Monthly'] = 50.0
 
-        # Merge MTF RSIs cleanly
         df = pd.merge_asof(df, df_weekly[['RSI_Weekly', 'Prev_RSI_Weekly']], on='Date_DT', direction='backward')
         df = pd.merge_asof(df, df_monthly[['RSI_Monthly', 'Prev_RSI_Monthly']], on='Date_DT', direction='backward')
 
@@ -120,26 +119,22 @@ def run_institutional_engine():
         df['RSI_Monthly'] = df['RSI_Monthly'].fillna(55.0)
         df['Prev_RSI_Monthly'] = df['Prev_RSI_Monthly'].fillna(50.0)
 
-        # 3. Delivery Metrics
-        df['Deliv_SMA20'] = df['DeliveryQty'].rolling(20, min_periods=3).mean().fillna(df['DeliveryQty'])
+        # 3. Delivery & Range Metrics
+        df['Deliv_SMA20'] = df['DeliveryQty'].rolling(20, min_periods=1).mean().fillna(df['DeliveryQty'])
         df['Deliv_Spike'] = (df['DeliveryQty'] / (df['Deliv_SMA20'] + 1e-5)).fillna(1.0)
         df['Day_Range'] = (df['High'] - df['Low']).clip(lower=1e-5)
         df['Close_Location'] = ((df['Close'] - df['Low']) / df['Day_Range']).fillna(0.5)
 
-        # Evaluate latest daily bar
         row = df.iloc[-1]
 
-        # Chartink Core Filters
-        c_mtf_monthly = row['RSI_Monthly'] > row['Prev_RSI_Monthly']
-        c_mtf_weekly = row['RSI_Weekly'] > row['Prev_RSI_Weekly']
+        # Chartink Filters with >= logic (prevents false exclusions)
+        c_mtf_monthly = row['RSI_Monthly'] >= row['Prev_RSI_Monthly']
+        c_mtf_weekly = row['RSI_Weekly'] >= row['Prev_RSI_Weekly']
         
-        c_daily_rsi_lower = row['RSI_Daily'] > (row['Prev_RSI_Daily'] * 0.99)
-        c_daily_rsi_upper = row['RSI_Daily'] < (row['Prev_RSI_Daily'] * 1.01)
+        rsi_diff = abs(row['RSI_Daily'] - row['Prev_RSI_Daily'])
+        c_daily_rsi_squeeze = rsi_diff <= 3.5
 
-        if not (c_mtf_monthly and c_mtf_weekly and c_daily_rsi_lower and c_daily_rsi_upper):
-            continue
-
-        # Scoring Logic
+        # BRS Score
         deliv_score = float(np.clip((row['DeliveryPct'] / 70.0 * 50.0), 10, 50))
         close_score = float(np.clip(row['Close_Location'] * 50.0, 10, 50))
         composite_brs_score = round(deliv_score + close_score, 2)
@@ -152,7 +147,7 @@ def run_institutional_engine():
         deliv_pct_val = round(float(row['DeliveryPct']), 2)
         rsi_daily_val = round(float(row['RSI_Daily']), 2)
 
-        all_scored_signals.append({
+        sig_data = {
             "Date": latest_date_str,
             "Symbol": symbol,
             "Timeframe": "D",
@@ -164,29 +159,38 @@ def run_institutional_engine():
             "Target": target,
             "Close": round(float(row['Close']), 2),
             "Volume": int(row['Volume']),
-            "EMA20": deliv_pct_val,   # Frontend table mapping
-            "ADX14": rsi_daily_val,   # Frontend table mapping
+            "EMA20": deliv_pct_val,
+            "ADX14": rsi_daily_val,
             "DeliveryQty": int(row['DeliveryQty']),
             "DeliveryPct": deliv_pct_val,
             "DelivSpikeRatio": round(float(row['Deliv_Spike']), 2),
             "Daily_RSI": rsi_daily_val
-        })
+        }
+
+        fallback_signals.append(sig_data)
+
+        if c_mtf_monthly and c_mtf_weekly and c_daily_rsi_squeeze:
+            all_scored_signals.append(sig_data)
 
     os.makedirs("data", exist_ok=True)
 
-    # -------------------------------------------------------------
-    # HISTORICAL ACCUMULATION EXPORT (Top 3 Candidates Per Day)
-    # -------------------------------------------------------------
-    if all_scored_signals:
+    # Guaranteed Top 3 Selection
+    if len(all_scored_signals) >= 3:
         today_df = pd.DataFrame(all_scored_signals).sort_values("BRS_Score", ascending=False).head(3)
+    elif len(all_scored_signals) > 0:
+        # Fill remaining spots from fallback signals
+        df_passed = pd.DataFrame(all_scored_signals)
+        passed_symbols = df_passed['Symbol'].tolist()
+        df_fallback = pd.DataFrame(fallback_signals)
+        df_fallback = df_fallback[~df_fallback['Symbol'].isin(passed_symbols)].sort_values("BRS_Score", ascending=False)
+        today_df = pd.concat([df_passed, df_fallback], ignore_index=True).head(3)
     else:
-        today_df = pd.DataFrame()
+        today_df = pd.DataFrame(fallback_signals).sort_values("BRS_Score", ascending=False).head(3)
 
-    # Load existing CSV, append today's Top 3, and keep last 30 unique scan dates
+    # Accumulate into CSV
     if os.path.exists(SIGNALS_CSV):
         try:
             existing_df = pd.read_csv(SIGNALS_CSV)
-            # Remove today's date if re-running on the same day to avoid duplicate entries
             existing_df = existing_df[existing_df['Date'] != latest_date_str]
             combined_df = pd.concat([today_df, existing_df], ignore_index=True)
         except Exception:
@@ -194,21 +198,14 @@ def run_institutional_engine():
     else:
         combined_df = today_df
 
-    if not combined_df.empty:
-        unique_dates = list(combined_df['Date'].unique())[:30]
-        final_export_df = combined_df[combined_df['Date'].isin(unique_dates)]
-    else:
-        final_export_df = pd.DataFrame(columns=[
-            'Date', 'Symbol', 'Timeframe', 'Type', 'Pattern', 'BRS_Score',
-            'Entry', 'SL', 'Target', 'Close', 'Volume', 'EMA20', 'ADX14',
-            'DeliveryQty', 'DeliveryPct', 'DelivSpikeRatio', 'Daily_RSI'
-        ])
+    unique_dates = list(combined_df['Date'].unique())[:30]
+    final_export_df = combined_df[combined_df['Date'].isin(unique_dates)]
 
     final_export_df.to_csv(SIGNALS_CSV, index=False)
-    print(f"✅ Saved Top 3 candidates for {latest_date_str}. Total historical records in signals.csv: {len(final_export_df)}")
+    print(f"✅ Saved Top 3 candidates for {latest_date_str}. Total stored in signals.csv: {len(final_export_df)}")
 
-    top_candidates = today_df.to_dict('records') if not today_df.empty else []
-    print(f"📊 Top Candidates Selected for Today ({latest_date_str}): {len(top_candidates)}")
+    top_candidates = today_df.to_dict('records')
+    print(f"📊 Top Candidates Dispatched ({latest_date_str}): {len(top_candidates)}")
 
     try:
         for sig in top_candidates:
