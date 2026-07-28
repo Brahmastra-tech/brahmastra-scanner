@@ -3,16 +3,12 @@ import duckdb
 import pandas as pd
 import numpy as np
 
-# ==========================================
-# CONFIGURATION
-# ==========================================
 DB_PATH = "data/candles.duckdb"
 BACKTEST_CSV = "data/backtest_results.csv"
-TARGET_X = 3.0  # 3:1 Reward-to-Risk Ratio
-
+TARGET_X = 3.0
 
 def compute_rsi(series: pd.Series, period: int = 14) -> pd.Series:
-    """Calculates Wilder's RSI safely without NaN issues."""
+    """Calculates Wilder's RSI matching Chartink's standard 14-period RSI."""
     delta = series.diff()
     gain = delta.clip(lower=0)
     loss = -1 * delta.clip(upper=0)
@@ -22,9 +18,8 @@ def compute_rsi(series: pd.Series, period: int = 14) -> pd.Series:
     rsi = 100.0 - (100.0 / (1.0 + rs))
     return rsi.fillna(50.0)
 
-
 def run_90day_backfill():
-    print("⏳ Running 90-Day Backfill & Performance Evaluator...")
+    print("⏳ Running Chartink-Aligned Backfill Engine (Past 90 Days)...")
 
     if not os.path.exists(DB_PATH):
         print(f"❌ Database not found at {DB_PATH}.")
@@ -60,72 +55,73 @@ def run_90day_backfill():
     df_raw["Date_DT"] = pd.to_datetime(df_raw["Date"])
     all_historical_signals = []
 
-    # Loop through each stock in the database
     for symbol, df_sym in df_raw.groupby('Symbol'):
-        if len(df_sym) < 30:
+        if len(df_sym) < 20:
             continue
 
         df = df_sym.copy().sort_values("Date_DT").reset_index(drop=True)
 
-        # 1. Multi-Timeframe Indicators
+        # 1. Daily RSI & Previous Day Shift
         df['RSI_Daily'] = compute_rsi(df['Close'], 14)
-        df['Prev_RSI_Daily'] = df['RSI_Daily'].shift(1).fillna(df['RSI_Daily'])
+        df['Prev_RSI_Daily'] = df['RSI_Daily'].shift(1)
 
+        # 2. Resample Weekly & Monthly RSIs
         df_weekly = df.set_index('Date_DT').resample('W-FRI').agg({'Close': 'last'}).dropna()
-        if len(df_weekly) >= 15:
-            df_weekly['RSI_Weekly'] = compute_rsi(df_weekly['Close'], 14)
-            df_weekly['Prev_RSI_Weekly'] = df_weekly['RSI_Weekly'].shift(1).fillna(df_weekly['RSI_Weekly'])
-        else:
-            df_weekly['RSI_Weekly'] = 55.0
-            df_weekly['Prev_RSI_Weekly'] = 50.0
+        df_weekly['RSI_Weekly'] = compute_rsi(df_weekly['Close'], 14) if len(df_weekly) >= 14 else 55.0
+        df_weekly['Prev_RSI_Weekly'] = df_weekly['RSI_Weekly'].shift(1) if len(df_weekly) >= 14 else 50.0
 
         df_monthly = df.set_index('Date_DT').resample('ME').agg({'Close': 'last'}).dropna()
-        if len(df_monthly) >= 15:
-            df_monthly['RSI_Monthly'] = compute_rsi(df_monthly['Close'], 14)
-            df_monthly['Prev_RSI_Monthly'] = df_monthly['RSI_Monthly'].shift(1).fillna(df_monthly['RSI_Monthly'])
-        else:
-            df_monthly['RSI_Monthly'] = 55.0
-            df_monthly['Prev_RSI_Monthly'] = 50.0
+        df_monthly['RSI_Monthly'] = compute_rsi(df_monthly['Close'], 14) if len(df_monthly) >= 14 else 55.0
+        df_monthly['Prev_RSI_Monthly'] = df_monthly['RSI_Monthly'].shift(1) if len(df_monthly) >= 14 else 50.0
 
+        # Merge MTF RSIs cleanly
         df = pd.merge_asof(df, df_weekly[['RSI_Weekly', 'Prev_RSI_Weekly']], on='Date_DT', direction='backward')
         df = pd.merge_asof(df, df_monthly[['RSI_Monthly', 'Prev_RSI_Monthly']], on='Date_DT', direction='backward')
 
+        # Fallback values for short history
         df['RSI_Weekly'] = df['RSI_Weekly'].fillna(55.0)
         df['Prev_RSI_Weekly'] = df['Prev_RSI_Weekly'].fillna(50.0)
         df['RSI_Monthly'] = df['RSI_Monthly'].fillna(55.0)
         df['Prev_RSI_Monthly'] = df['Prev_RSI_Monthly'].fillna(50.0)
 
-        df['Deliv_SMA20'] = df['DeliveryQty'].rolling(20, min_periods=5).mean().fillna(df['DeliveryQty'])
+        df['Deliv_SMA20'] = df['DeliveryQty'].rolling(20, min_periods=3).mean().fillna(df['DeliveryQty'])
         df['Deliv_Spike'] = (df['DeliveryQty'] / (df['Deliv_SMA20'] + 1e-5)).fillna(1.0)
         df['Day_Range'] = (df['High'] - df['Low']).clip(lower=1e-5)
         df['Close_Location'] = ((df['Close'] - df['Low']) / df['Day_Range']).fillna(0.5)
 
-        # 2. Iterate through historical bars (Last 90 trading days)
-        start_idx = max(20, len(df) - 90)
+        # 3. Bar-by-Bar Evaluation Across Past 90 Trading Days
+        start_idx = max(2, len(df) - 90)
         for i in range(start_idx, len(df)):
             row = df.iloc[i]
 
-            c_mtf_monthly = row['RSI_Monthly'] >= row['Prev_RSI_Monthly']
-            c_mtf_weekly = row['RSI_Weekly'] >= row['Prev_RSI_Weekly']
-            rsi_diff = abs(row['RSI_Daily'] - row['Prev_RSI_Daily'])
-            c_daily_rsi_squeeze = rsi_diff <= 3.0
-            c_vol_ok = row['Volume'] >= 150000
-
-            if not (c_mtf_monthly and c_mtf_weekly and c_vol_ok and c_daily_rsi_squeeze):
+            if pd.isna(row['Prev_RSI_Daily']):
                 continue
 
-            # BRS Score Calculation
-            s_rsi_squeeze = float(np.clip((3.0 - rsi_diff) / 3.0 * 30.0, 0, 30))
-            s_delivery = float(np.clip((row['DeliveryPct'] / 70.0 * 20.0) + (row['Deliv_Spike'] / 2.0 * 20.0), 0, 40))
-            s_close_loc = float(np.clip(row['Close_Location'] * 30.0, 0, 30))
-            brs_score = round(float(np.nan_to_num(s_rsi_squeeze + s_delivery + s_close_loc, nan=50.0)), 2)
+            # Chartink Filters:
+            # 1. Monthly RSI > Prev Monthly RSI
+            # 2. Weekly RSI > Prev Weekly RSI
+            # 3. Daily RSI > Prev Daily RSI * 0.99
+            # 4. Daily RSI < Prev Daily RSI * 1.01
+            c_mtf_monthly = row['RSI_Monthly'] > row['Prev_RSI_Monthly']
+            c_mtf_weekly = row['RSI_Weekly'] > row['Prev_RSI_Weekly']
+            
+            c_daily_rsi_lower = row['RSI_Daily'] > (row['Prev_RSI_Daily'] * 0.99)
+            c_daily_rsi_upper = row['RSI_Daily'] < (row['Prev_RSI_Daily'] * 1.01)
+
+            if not (c_mtf_monthly and c_mtf_weekly and c_daily_rsi_lower and c_daily_rsi_upper):
+                continue
+
+            # Scoring Metric
+            deliv_score = np.clip((row['DeliveryPct'] / 70.0 * 50.0), 10, 50)
+            close_score = np.clip(row['Close_Location'] * 50.0, 10, 50)
+            brs_score = round(float(deliv_score + close_score), 2)
 
             entry = round(float(row['High']) + 0.05, 2)
             sl = round(float(row['Low']), 2)
             risk = max(entry - sl, float(row['Close']) * 0.01)
             target = round(entry + (risk * TARGET_X), 2)
 
-            # 3. Evaluate Trade Outcome on Future Bars
+            # Trade Outcome Evaluation over next 15 bars
             outcome = "OPEN"
             exit_price = float(row['Close'])
             bars_held = 0
@@ -144,8 +140,8 @@ def run_90day_backfill():
 
             if outcome == "OPEN" and not future_bars.empty:
                 exit_price = float(future_bars.iloc[-1]['Close'])
-                pnl_pct = round(((exit_price - entry) / entry) * 100, 2)
-                outcome = "WIN (OPEN)" if pnl_pct > 0 else "LOSS (OPEN)"
+                pnl_temp = round(((exit_price - entry) / entry) * 100, 2)
+                outcome = "WIN (OPEN)" if pnl_temp > 0 else "LOSS (OPEN)"
 
             pnl_pct = round(((exit_price - entry) / entry) * 100, 2)
 
@@ -168,8 +164,6 @@ def run_90day_backfill():
 
     if all_historical_signals:
         bt_df = pd.DataFrame(all_historical_signals).sort_values(["Date", "BRS_Score"], ascending=[False, False])
-        
-        # Save backtest results
         bt_df.to_csv(BACKTEST_CSV, index=False)
 
         total = len(bt_df)
@@ -177,12 +171,11 @@ def run_90day_backfill():
         win_rate = round((wins / total) * 100, 2) if total > 0 else 0
         avg_pnl = round(bt_df['PnL_Pct'].mean(), 2) if total > 0 else 0
 
-        print(f"\n✅ 90-Day Backfill Complete! Generated {total} historical signals.")
-        print(f"📊 Overall Win Rate: {win_rate}% ({wins}/{total}) | Avg PnL per Trade: {avg_pnl}%")
-        print(f"💾 Results saved to {BACKTEST_CSV}\n")
+        print(f"\n✅ Backfill Execution Success: Generated {total} historical matches.")
+        print(f"📊 Historical Win Rate: {win_rate}% ({wins}/{total}) | Avg PnL: {avg_pnl}%")
+        print(f"💾 Results stored in {BACKTEST_CSV}\n")
     else:
-        print("⚠️ No historical signals generated over 90 days.")
-
+        print("⚠️ 0 matches found across the historical window. Checking database candle counts...")
 
 if __name__ == "__main__":
     run_90day_backfill()
