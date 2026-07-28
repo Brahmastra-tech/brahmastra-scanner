@@ -11,7 +11,7 @@ import requests
 DB_PATH = "data/candles.duckdb"
 SIGNALS_CSV = "data/signals.csv"
 
-TARGET_X = 3.0  # R:R Multiple
+TARGET_X = 3.0  # Risk:Reward Multiple
 
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN") or os.getenv("TELEGRAM_TOKEN") or os.getenv("BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID") or os.getenv("CHAT_ID")
@@ -33,7 +33,7 @@ def compute_rsi(series: pd.Series, period: int = 14) -> pd.Series:
 
 
 def run_institutional_engine():
-    print("🚀 Running Fixed Brahmastra Pre-Breakout RSI Engine...")
+    print("🚀 Running Brahmastra MTF RSI Squeeze & Institutional Absorption Engine...")
 
     if not os.path.exists(DB_PATH):
         print(f"❌ Database not found at {DB_PATH}. Run bhavcopy_ingest.py first!")
@@ -41,7 +41,7 @@ def run_institutional_engine():
 
     conn = duckdb.connect(DB_PATH)
 
-    # Inspect columns dynamically
+    # Inspect table columns dynamically
     cols_info = conn.execute("DESCRIBE ohlcv_candles").fetchall()
     existing_cols = [col[0].lower() for col in cols_info]
 
@@ -131,12 +131,15 @@ def run_institutional_engine():
         # Target the latest bar for PRE-BREAKOUT identification
         row = df.iloc[-1]
 
-        # Chartink Core Filters
+        # Chartink MTF Filters:
+        # - Monthly RSI rising
+        # - Weekly RSI rising
+        # - Daily RSI flatline / consolidating (within +/- 3.0)
         c_mtf_monthly = row['RSI_Monthly'] >= row['Prev_RSI_Monthly']
         c_mtf_weekly = row['RSI_Weekly'] >= row['Prev_RSI_Weekly']
         
         rsi_diff = abs(row['RSI_Daily'] - row['Prev_RSI_Daily'])
-        c_daily_rsi_squeeze = rsi_diff <= 3.0  # RSI Flatline (Consolidation)
+        c_daily_rsi_squeeze = rsi_diff <= 3.0
 
         c_vol_ok = row['Volume'] >= 150000
 
@@ -151,49 +154,55 @@ def run_institutional_engine():
         composite_brs = float(np.nan_to_num(s_rsi_squeeze + s_delivery + s_close_loc, nan=50.0))
         composite_brs_score = round(composite_brs, 2)
 
-        # Trigger Buy is placed ABOVE the consolidation bar High (Catching breakout 1-2 days before expansion)
+        # Trigger Buy is placed ABOVE the consolidation bar High
         entry = round(float(row['High']) + 0.05, 2)
         sl = round(float(row['Low']), 2)
         risk = max(entry - sl, float(row['Close']) * 0.01)
         target = round(entry + (risk * TARGET_X), 2)
+
+        deliv_pct_val = round(float(row['DeliveryPct']), 2)
+        rsi_daily_val = round(float(row['RSI_Daily']), 2)
 
         all_scored_signals.append({
             "Date": latest_date_str,
             "Symbol": symbol,
             "Timeframe": "D",
             "Type": "PRE_BREAKOUT",
-            "Pattern": "MTF_RSI_ACCUMULATION",
+            "Pattern": "PRE_BREAKOUT",
             "BRS_Score": composite_brs_score,
             "Entry": entry,
             "SL": sl,
             "Target": target,
             "Close": round(float(row['Close']), 2),
             "Volume": int(row['Volume']),
+            "EMA20": deliv_pct_val,   # Frontend column mapping
+            "ADX14": rsi_daily_val,   # Frontend column mapping
             "DeliveryQty": int(row['DeliveryQty']),
-            "DeliveryPct": round(float(row['DeliveryPct']), 2),
+            "DeliveryPct": deliv_pct_val,
             "DelivSpikeRatio": round(float(row['Deliv_Spike']), 2),
-            "Daily_RSI": round(float(row['RSI_Daily']), 2)
+            "Daily_RSI": rsi_daily_val
         })
 
     os.makedirs("data", exist_ok=True)
 
     # -------------------------------------------------------------
-    # RESTRICTIVE EXPORT: Save Top 3 Candidates Only to signals.csv
+    # STRICT OVERWRITE EXPORT: Save ONLY Current Day's Top 3 Candidates
     # -------------------------------------------------------------
     if all_scored_signals:
         export_df = pd.DataFrame(all_scored_signals).sort_values("BRS_Score", ascending=False).head(3)
     else:
         export_df = pd.DataFrame(columns=[
             'Date', 'Symbol', 'Timeframe', 'Type', 'Pattern', 'BRS_Score',
-            'Entry', 'SL', 'Target', 'Close', 'Volume', 'DeliveryQty',
-            'DeliveryPct', 'DelivSpikeRatio', 'Daily_RSI'
+            'Entry', 'SL', 'Target', 'Close', 'Volume', 'EMA20', 'ADX14',
+            'DeliveryQty', 'DeliveryPct', 'DelivSpikeRatio', 'Daily_RSI'
         ])
 
-    export_df.to_csv(SIGNALS_CSV, index=False)
-    print(f"✅ Saved Top {len(export_df)} pre-breakout candidates to {SIGNALS_CSV}.")
+    # Overwrite signals.csv completely to eliminate past historical clutter
+    export_df.to_csv(SIGNALS_CSV, index=False, mode='w')
+    print(f"✅ Cleaned signals.csv: Saved exactly Top {len(export_df)} current day candidates.")
 
     top_candidates = export_df.to_dict('records')
-    print(f"📊 Top Ranked Candidates Selected for Today ({latest_date_str}): {len(top_candidates)}")
+    print(f"📊 Top Candidates Selected for Today ({latest_date_str}): {len(top_candidates)}")
 
     try:
         for sig in top_candidates:
