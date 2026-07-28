@@ -8,7 +8,6 @@ import numpy as np
 # ==========================================
 DB_PATH = "data/candles.duckdb"
 SIGNALS_CSV = "data/signals.csv"
-BACKTEST_CSV = "data/backtest_results.csv"
 TARGET_X = 3.0  # 3:1 Reward-to-Risk Ratio
 
 
@@ -59,8 +58,6 @@ def run_90day_backfill():
         return
 
     df_raw["Date_DT"] = pd.to_datetime(df_raw["Date"])
-    
-    # Store candidates grouped by Date
     daily_candidates_map = {}
 
     for symbol, df_sym in df_raw.groupby('Symbol'):
@@ -69,12 +66,11 @@ def run_90day_backfill():
 
         df = df_sym.copy().sort_values("Date_DT").reset_index(drop=True)
 
-        # Sanitize delivery and volume numericals
         df['DeliveryQty'] = df['DeliveryQty'].fillna(0.0)
         df['DeliveryPct'] = df['DeliveryPct'].fillna(0.0)
         df['Volume'] = df['Volume'].fillna(0.0)
 
-        # 1. Indicator Calculations
+        # Indicators
         df['RSI_Daily'] = compute_rsi(df['Close'], 14)
         df['Prev_RSI_Daily'] = df['RSI_Daily'].shift(1).fillna(df['RSI_Daily'])
 
@@ -107,7 +103,6 @@ def run_90day_backfill():
         df['Day_Range'] = (df['High'] - df['Low']).clip(lower=1e-5)
         df['Close_Location'] = ((df['Close'] - df['Low']) / df['Day_Range']).fillna(0.5)
 
-        # 2. Loop through all historical bars
         for i in range(len(df)):
             row = df.iloc[i]
             date_str = row['Date_DT'].strftime("%d-%m-%Y")
@@ -156,7 +151,7 @@ def run_90day_backfill():
 
             daily_candidates_map[date_str].append(sig_data)
 
-    # 3. Extract Top 3 Candidates for EVERY historical date
+    # Extract Top 3 Candidates for EVERY historical date
     all_final_signals = []
     for d_str, candidates in daily_candidates_map.items():
         top_3_day = pd.DataFrame(candidates).sort_values("BRS_Score", ascending=False).head(3)
@@ -166,9 +161,17 @@ def run_90day_backfill():
 
     if all_final_signals:
         signals_df = pd.DataFrame(all_final_signals)
-        # Save complete multi-day history to signals.csv
-        signals_df.to_csv(SIGNALS_CSV, index=False)
-        print(f"✅ Successfully backfilled signals.csv with {len(signals_df)} historical records across {len(daily_candidates_map)} dates!")
+
+        # Sort strictly NEWEST -> OLDEST
+        signals_df['Date_DT'] = pd.to_datetime(signals_df['Date'], format="%d-%m-%Y")
+        signals_df = signals_df.sort_values(by=['Date_DT', 'BRS_Score'], ascending=[False, False])
+
+        # Keep the 30 MOST RECENT trading dates
+        recent_dates = signals_df['Date_DT'].unique()[:30]
+        final_df = signals_df[signals_df['Date_DT'].isin(recent_dates)].drop(columns=['Date_DT'])
+
+        final_df.to_csv(SIGNALS_CSV, index=False)
+        print(f"✅ Successfully updated {SIGNALS_CSV} with {len(final_df)} historical records across recent trading sessions!")
     else:
         print("⚠️ No historical signals generated.")
 
