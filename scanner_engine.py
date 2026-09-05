@@ -27,10 +27,6 @@ NSE_FO_URL = "https://archives.nseindia.com/content/fo/fo_mktlots.csv"
 
 
 def get_nifty_fo_symbols() -> set:
-    """
-    Fetches the active NSE F&O underlying stock list.
-    Falls back to the complete active F&O constituent list if NSE times out.
-    """
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
     }
@@ -46,10 +42,9 @@ def get_nifty_fo_symbols() -> set:
                     if sym and not any(idx in sym for idx in ["NIFTY", "INDIAVIX"]):
                         symbols.add(sym)
             if symbols:
-                print(f"✅ Fetched {len(symbols)} active F&O symbols dynamically.")
                 return symbols
     except Exception:
-        print("⚠️ Cloud runner timeout fetching NSE archive. Using active F&O fallback universe.")
+        pass
 
     return {
         "AARTIIND", "ABB", "ABBOTINDIA", "ABCAPITAL", "ABFRL", "ACC", "ADANIENT",
@@ -82,7 +77,6 @@ def get_nifty_fo_symbols() -> set:
 
 
 def compute_chandelier_exit(df: pd.DataFrame, period: int = 22, mult: float = 3.0):
-    """Calculates True Range, Smoothed ATR, and Chandelier Exit Long floor."""
     high = df['High']
     low = df['Low']
     close_prev = df['Close'].shift(1)
@@ -117,46 +111,13 @@ def run_institutional_engine():
         "open AS Open", "high AS High", "low AS Low", "close AS Close", "volume AS Volume"
     ]
 
-    # Enforce strictly Series EQ
-    if "series" in existing_cols:
-        select_parts.append("series AS Series")
-    else:
-        select_parts.append("'EQ' AS Series")
-
-    # Market Cap validation
-    if "market_cap" in existing_cols:
-        select_parts.append("market_cap AS MarketCap")
-    elif "shares_outstanding" in existing_cols:
-        select_parts.append("(close * shares_outstanding) AS MarketCap")
-    else:
-        select_parts.append("0.0 AS MarketCap")
-
-    # Delivery columns
-    if "delivery_qty" in existing_cols:
-        select_parts.append("delivery_qty AS DeliveryQty")
-    else:
-        select_parts.append("volume * 0.45 AS DeliveryQty")
-
-    if "delivery_pct" in existing_cols:
-        select_parts.append("delivery_pct AS DeliveryPct")
-    else:
-        select_parts.append("45.0 AS DeliveryPct")
-
-    # Order Flow & CE Options columns
-    if "delta_volume" in existing_cols:
-        select_parts.append("delta_volume AS Delta_Volume")
-    else:
-        select_parts.append("CASE WHEN close >= open THEN volume * 0.55 ELSE -(volume * 0.55) END AS Delta_Volume")
-
-    if "order_flow_delta" in existing_cols:
-        select_parts.append("order_flow_delta AS Order_Flow_Delta")
-    else:
-        select_parts.append("CASE WHEN close >= open THEN 1.0 ELSE -1.0 END AS Order_Flow_Delta")
-
-    if "ce_buy_flow" in existing_cols:
-        select_parts.append("ce_buy_flow AS CE_Buy_Flow")
-    else:
-        select_parts.append("TRUE AS CE_Buy_Flow")
+    select_parts.append("series AS Series" if "series" in existing_cols else "'EQ' AS Series")
+    select_parts.append("market_cap AS MarketCap" if "market_cap" in existing_cols else "0.0 AS MarketCap")
+    select_parts.append("delivery_qty AS DeliveryQty" if "delivery_qty" in existing_cols else "volume * 0.45 AS DeliveryQty")
+    select_parts.append("delivery_pct AS DeliveryPct" if "delivery_pct" in existing_cols else "45.0 AS DeliveryPct")
+    select_parts.append("delta_volume AS Delta_Volume" if "delta_volume" in existing_cols else "CASE WHEN close >= open THEN volume * 0.55 ELSE -(volume * 0.55) END AS Delta_Volume")
+    select_parts.append("order_flow_delta AS Order_Flow_Delta" if "order_flow_delta" in existing_cols else "CASE WHEN close >= open THEN 1.0 ELSE -1.0 END AS Order_Flow_Delta")
+    select_parts.append("ce_buy_flow AS CE_Buy_Flow" if "ce_buy_flow" in existing_cols else "TRUE AS CE_Buy_Flow")
 
     query = f"""
         SELECT {', '.join(select_parts)} 
@@ -172,7 +133,6 @@ def run_institutional_engine():
         print("⚠️ No EQ records found in database meeting the initial price filter.")
         return
 
-    # Filter strictly for NSE F&O universe
     df_raw["Symbol_Clean"] = df_raw["Symbol"].str.upper().str.strip()
     df_raw = df_raw[df_raw["Symbol_Clean"].isin(fo_symbols)].copy()
 
@@ -183,36 +143,23 @@ def run_institutional_engine():
     df_raw["Date_DT"] = pd.to_datetime(df_raw["Date"])
     latest_date_str = df_raw['Date_DT'].max().strftime("%d-%m-%Y")
 
-    stats = {
-        "total_fo_symbols": 0,
-        "price_and_mcap": 0,
-        "ce_and_order_flow": 0,
-        "delta_surge_passed": 0,
-        "final_signals": 0
-    }
-
     all_scored_signals = []
 
     for symbol, df_sym in df_raw.groupby('Symbol'):
         if len(df_sym) < CE_PERIOD + 5:
             continue
 
-        stats["total_fo_symbols"] += 1
         df = df_sym.copy().sort_values("Date_DT").reset_index(drop=True)
-
-        # Calculate Chandelier Exit Long line
         df['CE_Long'], df['ATR'] = compute_chandelier_exit(df, period=CE_PERIOD, mult=CE_MULTIPLIER)
 
         row = df.iloc[-1]
 
-        # Price & Market Cap Check
         if row['Close'] <= MIN_PRICE:
             continue
 
         mcap_val = float(row.get('MarketCap', 0.0))
         if mcap_val > 0.0 and mcap_val < MIN_MARKET_CAP:
             continue
-        stats["price_and_mcap"] += 1
 
         df['DeliveryQty'] = df['DeliveryQty'].fillna(0.0)
         df['DeliveryPct'] = df['DeliveryPct'].fillna(0.0)
@@ -221,29 +168,21 @@ def run_institutional_engine():
         df['Order_Flow_Delta'] = df['Order_Flow_Delta'].fillna(0.0)
         df['CE_Buy_Flow'] = df['CE_Buy_Flow'].fillna(False).astype(bool)
 
-        # Baseline & Expansion Metrics
         df['Prev_Delta'] = df['Delta_Volume'].shift(1).fillna(0.0)
-        df['Avg_Delta_5'] = (
-            df['Delta_Volume'].abs().shift(1).rolling(5, min_periods=3).mean().fillna(0.0)
-        )
+        df['Avg_Delta_5'] = df['Delta_Volume'].abs().shift(1).rolling(5, min_periods=3).mean().fillna(0.0)
 
         df['Day_Range'] = (df['High'] - df['Low']).clip(lower=1e-5)
         df['Close_Location'] = ((df['Close'] - df['Low']) / df['Day_Range']).fillna(0.5)
 
         row = df.iloc[-1]
 
-        # --- CONDITION 1: CHANDELIER EXIT & CE FLOW ---
-        # Price closes above the trailing Chandelier floor
         cond_chandelier = (row['Close'] > row['CE_Long']) if pd.notna(row['CE_Long']) else True
         cond_ce_buy = bool(row['CE_Buy_Flow'])
-
-        # --- CONDITION 2: ORDER FLOW DELTA ---
         cond_order_flow = (row['Order_Flow_Delta'] > 0) and (row['Delta_Volume'] > 0)
+
         if not (cond_chandelier and cond_ce_buy and cond_order_flow):
             continue
-        stats["ce_and_order_flow"] += 1
 
-        # --- CONDITION 3: DELTA VOLUME SURGE ---
         prev_d = row['Prev_Delta']
         curr_d = row['Delta_Volume']
         avg_d5 = row['Avg_Delta_5']
@@ -256,10 +195,7 @@ def run_institutional_engine():
         cond_surge_avg = curr_d >= (2.0 * avg_d5)
         if not (cond_surge_prev and cond_surge_avg):
             continue
-        stats["delta_surge_passed"] += 1
-        stats["final_signals"] += 1
 
-        # Scoring & Target/Stop calculations
         deliv_score = float(np.clip((row['DeliveryPct'] / 70.0 * 50.0), 10, 50))
         close_score = float(np.clip(row['Close_Location'] * 50.0, 10, 50))
         composite_brs_score = round(deliv_score + close_score, 2)
@@ -273,7 +209,7 @@ def run_institutional_engine():
         deliv_pct_val = round(float(np.nan_to_num(row['DeliveryPct'], nan=0.0)), 2)
         spike_ratio = round(float(curr_d / (avg_d5 + 1e-5)), 2)
 
-        # Output schema matches frontend columns exactly
+        # UNIFIED CLEAN SCHEMA
         all_scored_signals.append({
             "Date": latest_date_str,
             "Symbol": symbol,
@@ -286,17 +222,10 @@ def run_institutional_engine():
             "Target": target,
             "Close": round(float(row['Close']), 2),
             "Volume": int(np.nan_to_num(row['Volume'], nan=0)),
-            "EMA20": deliv_pct_val,
-            "ADX14": spike_ratio,
-            "ema": deliv_pct_val,
-            "adx": spike_ratio,
             "DeliveryQty": int(np.nan_to_num(row['DeliveryQty'], nan=0)),
             "DeliveryPct": deliv_pct_val,
-            "DelivSpikeRatio": spike_ratio,
-            "Daily_RSI": spike_ratio
+            "DelivSpikeRatio": spike_ratio
         })
-
-    print(f"📊 Filter Funnel Diagnostics: {stats}")
 
     os.makedirs("data", exist_ok=True)
     today_df = pd.DataFrame(all_scored_signals).sort_values("BRS_Score", ascending=False) if all_scored_signals else pd.DataFrame()
@@ -304,26 +233,33 @@ def run_institutional_engine():
     if os.path.exists(SIGNALS_CSV):
         try:
             existing_df = pd.read_csv(SIGNALS_CSV)
-            # Retain records within the last 7 calendar days
-            existing_df['Date_DT'] = pd.to_datetime(existing_df['Date'], format="%d-%m-%Y", errors='coerce')
-            cutoff = pd.to_datetime('today') - pd.Timedelta(days=7)
-            existing_df = existing_df[(existing_df['Date_DT'] >= cutoff) & (existing_df['Date'] != latest_date_str)]
-            existing_df = existing_df.drop(columns=['Date_DT'])
+            # Remove any existing entries for today, keep history
+            existing_df = existing_df[existing_df['Date'] != latest_date_str]
             combined_df = pd.concat([today_df, existing_df], ignore_index=True)
         except Exception:
             combined_df = today_df
     else:
         combined_df = today_df
 
+    # Standardize column list
+    clean_columns = [
+        "Date", "Symbol", "Timeframe", "Type", "Pattern", "BRS_Score",
+        "Entry", "SL", "Target", "Close", "Volume",
+        "DeliveryQty", "DeliveryPct", "DelivSpikeRatio"
+    ]
+
     if not combined_df.empty:
-        combined_df['Date_DT'] = pd.to_datetime(combined_df['Date'], format="%d-%m-%Y")
+        # Keep only the columns that belong in the clean schema
+        available_cols = [c for c in clean_columns if c in combined_df.columns]
+        combined_df = combined_df[available_cols]
+        combined_df['Date_DT'] = pd.to_datetime(combined_df['Date'], format="%d-%m-%Y", errors='coerce')
         combined_df = combined_df.sort_values(by=['Date_DT', 'BRS_Score'], ascending=[False, False])
         final_export_df = combined_df.drop(columns=['Date_DT'])
     else:
-        final_export_df = combined_df
+        final_export_df = pd.DataFrame(columns=clean_columns)
 
     final_export_df.to_csv(SIGNALS_CSV, index=False)
-    print(f"✅ Saved {len(today_df)} dynamic Nifty F&O candidates for {latest_date_str}.")
+    print(f"✅ Saved clean candidates for {latest_date_str}.")
 
     top_candidates = today_df.to_dict('records') if not today_df.empty else []
     try:
@@ -336,7 +272,6 @@ def run_institutional_engine():
 
 def send_telegram_alert(signal: dict):
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
-        print("⚠️ Telegram credentials missing; skipped sending individual alert.")
         return
 
     symbol = signal.get("Symbol")
@@ -379,18 +314,13 @@ def send_telegram_alert(signal: dict):
             "parse_mode": "HTML",
             "disable_web_page_preview": True
         }
-        res = requests.post(url, json=payload, timeout=10)
-        if res.status_code != 200:
-            print(f"❌ Telegram API Error ({symbol}): {res.text}")
-        else:
-            print(f"✅ Dispatched Telegram alert for {symbol}")
+        requests.post(url, json=payload, timeout=10)
     except Exception as e:
-        print(f"❌ Network error dispatching Telegram alert for {symbol}: {e}")
+        print(f"❌ Telegram alert network error: {e}")
 
 
 def send_summary_telegram(candidates: list, date_str: str):
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
-        print("⚠️ Telegram credentials missing; skipped sending summary.")
         return
 
     cache_buster = int(time.time())
@@ -414,13 +344,9 @@ def send_summary_telegram(candidates: list, date_str: str):
             "text": message,
             "parse_mode": "HTML"
         }
-        res = requests.post(url, json=payload, timeout=10)
-        if res.status_code != 200:
-            print(f"❌ Telegram Summary API Error: {res.text}")
-        else:
-            print(f"✅ Dispatched Telegram Summary for {date_str}")
+        requests.post(url, json=payload, timeout=10)
     except Exception as e:
-        print(f"❌ Network error dispatching Telegram summary: {e}")
+        print(f"❌ Telegram summary network error: {e}")
 
 
 if __name__ == "__main__":
