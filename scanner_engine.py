@@ -15,6 +15,10 @@ TARGET_X = 3.0
 MIN_MARKET_CAP = 51_000_000_000.0  # ₹51 Billion (₹5,100 Crore)
 MIN_PRICE = 100.0
 
+# Chandelier Exit Parameters
+CE_PERIOD = 22
+CE_MULTIPLIER = 3.0
+
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN") or os.getenv("TELEGRAM_TOKEN") or os.getenv("BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID") or os.getenv("CHAT_ID")
 DASHBOARD_URL = "https://brahmastra-tech.github.io/brahmastra-scanner/"
@@ -25,7 +29,7 @@ NSE_FO_URL = "https://archives.nseindia.com/content/fo/fo_mktlots.csv"
 def get_nifty_fo_symbols() -> set:
     """
     Fetches the active NSE F&O underlying stock list.
-    Falls back gracefully to the complete active F&O constituent list if NSE times out.
+    Falls back to the complete active F&O constituent list if NSE times out.
     """
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
@@ -77,19 +81,25 @@ def get_nifty_fo_symbols() -> set:
     }
 
 
-def compute_rsi(series: pd.Series, period: int = 14) -> pd.Series:
-    delta = series.diff()
-    gain = delta.clip(lower=0)
-    loss = -1 * delta.clip(upper=0)
-    avg_gain = gain.ewm(alpha=1/period, min_periods=period, adjust=False).mean()
-    avg_loss = loss.ewm(alpha=1/period, min_periods=period, adjust=False).mean()
-    rs = avg_gain / (avg_loss + 1e-5)
-    rsi = 100.0 - (100.0 / (1.0 + rs))
-    return rsi.fillna(50.0)
+def compute_chandelier_exit(df: pd.DataFrame, period: int = 22, mult: float = 3.0):
+    """Calculates True Range, Smoothed ATR, and Chandelier Exit Long floor."""
+    high = df['High']
+    low = df['Low']
+    close_prev = df['Close'].shift(1)
+
+    tr1 = high - low
+    tr2 = (high - close_prev).abs()
+    tr3 = (low - close_prev).abs()
+    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+
+    atr = tr.ewm(alpha=1/period, min_periods=period, adjust=False).mean()
+    highest_high = high.rolling(window=period, min_periods=period).max()
+    ce_long = highest_high - (mult * atr)
+    return ce_long, atr
 
 
 def run_institutional_engine():
-    print("🚀 Running Brahmastra Scanner Engine (Nifty F&O EQ | MCap ₹51B+ | Price > ₹100)...")
+    print("🚀 Running Brahmastra Scanner Engine (Chandelier Exit + Order Flow + Delta Surge)...")
 
     if not os.path.exists(DB_PATH):
         print(f"❌ Database not found at {DB_PATH}.")
@@ -178,18 +188,21 @@ def run_institutional_engine():
         "price_and_mcap": 0,
         "ce_and_order_flow": 0,
         "delta_surge_passed": 0,
-        "mtf_rsi_aligned": 0,
         "final_signals": 0
     }
 
     all_scored_signals = []
 
     for symbol, df_sym in df_raw.groupby('Symbol'):
-        if len(df_sym) < 15:
+        if len(df_sym) < CE_PERIOD + 5:
             continue
 
         stats["total_fo_symbols"] += 1
         df = df_sym.copy().sort_values("Date_DT").reset_index(drop=True)
+
+        # Calculate Chandelier Exit Long line
+        df['CE_Long'], df['ATR'] = compute_chandelier_exit(df, period=CE_PERIOD, mult=CE_MULTIPLIER)
+
         row = df.iloc[-1]
 
         # Price & Market Cap Check
@@ -214,33 +227,23 @@ def run_institutional_engine():
             df['Delta_Volume'].abs().shift(1).rolling(5, min_periods=3).mean().fillna(0.0)
         )
 
-        # Multi-Timeframe RSI
-        df['RSI_Daily'] = compute_rsi(df['Close'], 14)
-        df['Prev_RSI_Daily'] = df['RSI_Daily'].shift(1).fillna(df['RSI_Daily'])
-
-        df_weekly = df.set_index('Date_DT').resample('W-FRI').agg({'Close': 'last'}).dropna()
-        df_weekly['RSI_Weekly'] = compute_rsi(df_weekly['Close'], 14) if len(df_weekly) >= 5 else 55.0
-        df_weekly['Prev_RSI_Weekly'] = df_weekly['RSI_Weekly'].shift(1) if len(df_weekly) >= 5 else 50.0
-
-        df_monthly = df.set_index('Date_DT').resample('ME').agg({'Close': 'last'}).dropna()
-        df_monthly['RSI_Monthly'] = compute_rsi(df_monthly['Close'], 14) if len(df_monthly) >= 2 else 55.0
-        df_monthly['Prev_RSI_Monthly'] = df_monthly['RSI_Monthly'].shift(1) if len(df_monthly) >= 2 else 50.0
-
-        df = pd.merge_asof(df, df_weekly[['RSI_Weekly', 'Prev_RSI_Weekly']], on='Date_DT', direction='backward').fillna(50.0)
-        df = pd.merge_asof(df, df_monthly[['RSI_Monthly', 'Prev_RSI_Monthly']], on='Date_DT', direction='backward').fillna(50.0)
-
         df['Day_Range'] = (df['High'] - df['Low']).clip(lower=1e-5)
         df['Close_Location'] = ((df['Close'] - df['Low']) / df['Day_Range']).fillna(0.5)
 
         row = df.iloc[-1]
 
-        # Conditions
+        # --- CONDITION 1: CHANDELIER EXIT & CE FLOW ---
+        # Price closes above the trailing Chandelier floor
+        cond_chandelier = (row['Close'] > row['CE_Long']) if pd.notna(row['CE_Long']) else True
         cond_ce_buy = bool(row['CE_Buy_Flow'])
+
+        # --- CONDITION 2: ORDER FLOW DELTA ---
         cond_order_flow = (row['Order_Flow_Delta'] > 0) and (row['Delta_Volume'] > 0)
-        if not (cond_ce_buy and cond_order_flow):
+        if not (cond_chandelier and cond_ce_buy and cond_order_flow):
             continue
         stats["ce_and_order_flow"] += 1
 
+        # --- CONDITION 3: DELTA VOLUME SURGE ---
         prev_d = row['Prev_Delta']
         curr_d = row['Delta_Volume']
         avg_d5 = row['Avg_Delta_5']
@@ -254,45 +257,43 @@ def run_institutional_engine():
         if not (cond_surge_prev and cond_surge_avg):
             continue
         stats["delta_surge_passed"] += 1
-
-        c_mtf_monthly = row['RSI_Monthly'] >= row['Prev_RSI_Monthly']
-        c_mtf_weekly = row['RSI_Weekly'] >= row['Prev_RSI_Weekly']
-        if not (c_mtf_monthly and c_mtf_weekly):
-            continue
-        stats["mtf_rsi_aligned"] += 1
-
         stats["final_signals"] += 1
 
+        # Scoring & Target/Stop calculations
         deliv_score = float(np.clip((row['DeliveryPct'] / 70.0 * 50.0), 10, 50))
         close_score = float(np.clip(row['Close_Location'] * 50.0, 10, 50))
         composite_brs_score = round(deliv_score + close_score, 2)
 
         entry = round(float(row['High']) + 0.05, 2)
-        sl = round(float(row['Low']), 2)
+        ce_stop = round(float(row['CE_Long']), 2) if pd.notna(row['CE_Long']) else round(float(row['Low']), 2)
+        sl = min(round(float(row['Low']), 2), ce_stop)
         risk = max(entry - sl, float(row['Close']) * 0.01)
         target = round(entry + (risk * TARGET_X), 2)
 
         deliv_pct_val = round(float(np.nan_to_num(row['DeliveryPct'], nan=0.0)), 2)
-        rsi_daily_val = round(float(np.nan_to_num(row['RSI_Daily'], nan=50.0)), 2)
+        spike_ratio = round(float(curr_d / (avg_d5 + 1e-5)), 2)
 
+        # Output schema matches frontend columns exactly
         all_scored_signals.append({
             "Date": latest_date_str,
             "Symbol": symbol,
             "Timeframe": "D",
             "Type": "PRE_BREAKOUT",
-            "Pattern": "ORDER_FLOW_SURGE",
+            "Pattern": "PRE_BREAKOUT",
             "BRS_Score": composite_brs_score,
             "Entry": entry,
             "SL": sl,
             "Target": target,
             "Close": round(float(row['Close']), 2),
             "Volume": int(np.nan_to_num(row['Volume'], nan=0)),
+            "EMA20": deliv_pct_val,
+            "ADX14": spike_ratio,
             "ema": deliv_pct_val,
-            "adx": rsi_daily_val,
+            "adx": spike_ratio,
             "DeliveryQty": int(np.nan_to_num(row['DeliveryQty'], nan=0)),
             "DeliveryPct": deliv_pct_val,
-            "DelivSpikeRatio": round(float(curr_d / (avg_d5 + 1e-5)), 2),
-            "Daily_RSI": rsi_daily_val
+            "DelivSpikeRatio": spike_ratio,
+            "Daily_RSI": spike_ratio
         })
 
     print(f"📊 Filter Funnel Diagnostics: {stats}")
@@ -303,7 +304,7 @@ def run_institutional_engine():
     if os.path.exists(SIGNALS_CSV):
         try:
             existing_df = pd.read_csv(SIGNALS_CSV)
-            # Retain only previous 7 days of historical signals
+            # Retain records within the last 7 calendar days
             existing_df['Date_DT'] = pd.to_datetime(existing_df['Date'], format="%d-%m-%Y", errors='coerce')
             cutoff = pd.to_datetime('today') - pd.Timedelta(days=7)
             existing_df = existing_df[(existing_df['Date_DT'] >= cutoff) & (existing_df['Date'] != latest_date_str)]
@@ -346,7 +347,6 @@ def send_telegram_alert(signal: dict):
     target = signal.get("Target", 0.0)
     close = signal.get("Close", 0.0)
     deliv_pct = signal.get("DeliveryPct", 0.0)
-    rsi_val = signal.get("Daily_RSI", 0.0)
     spike_ratio = signal.get("DelivSpikeRatio", 1.0)
 
     chart_url = f"https://in.tradingview.com/chart/?symbol=NSE:{symbol}"
@@ -356,7 +356,7 @@ def send_telegram_alert(signal: dict):
         f"━━━━━━━━━━━━━━━━━━━━\n"
         f"📈 <b>Stock:</b> {symbol} (NSE F&O EQ)\n"
         f"⭐ <b>BRS Score:</b> {brs:.2f} / 100\n"
-        f"🎯 <b>Setup:</b> Order Flow + Delta Surge ({spike_ratio:.1f}x)\n"
+        f"🎯 <b>Setup:</b> Chandelier Exit + Delta Force ({spike_ratio:.1f}x)\n"
         f"⏱ <b>Date:</b> {setup_date}\n\n"
         f"📊 <b>ACTIONABLE TRIGGER LEVELS</b>\n"
         f"• <b>Trigger Buy Above   :</b> ₹{entry:.2f}\n"
@@ -365,7 +365,8 @@ def send_telegram_alert(signal: dict):
         f"• <b>Today's Close       :</b> ₹{close:.2f}\n\n"
         f"⚡ <b>ACCUMULATION METRICS</b>\n"
         f"• <b>Delivery %          :</b> {deliv_pct:.1f}%\n"
-        f"• <b>Daily RSI           :</b> {rsi_val:.1f} (Consolidating)\n"
+        f"• <b>Delta Volume Surge  :</b> {spike_ratio:.1f}x vs 5-Day Avg\n"
+        f"• <b>Order Flow Delta    :</b> Positive Buyers In Control\n"
         f"━━━━━━━━━━━━━━━━━━━━\n"
         f"📈 <a href='{chart_url}'>View {symbol} TradingView Chart</a>"
     )
@@ -392,7 +393,6 @@ def send_summary_telegram(candidates: list, date_str: str):
         print("⚠️ Telegram credentials missing; skipped sending summary.")
         return
 
-    # Add timestamp query param to break Telegram in-app webview cache
     cache_buster = int(time.time())
     active_dash_link = f"{DASHBOARD_URL}?v={cache_buster}"
 
@@ -400,7 +400,8 @@ def send_summary_telegram(candidates: list, date_str: str):
         f"🏁 <b>DAILY BRAHMASTRA SCAN COMPLETE ({date_str})</b>\n"
         f"━━━━━━━━━━━━━━━━━━━━\n"
         f"📊 <b>High-Conviction F&O Setups Found:</b> {len(candidates)}\n"
-        f"🔍 <b>Universe:</b> NSE F&O (EQ Only | MCap ₹51B+ | Price > ₹100)\n\n"
+        f"🔍 <b>Engine:</b> Chandelier Exit + Order Flow + Delta Surge\n"
+        f"🏛️ <b>Universe:</b> NSE F&O (EQ Only | MCap ₹51B+ | Price > ₹100)\n\n"
         f"🌐 <b>Interactive Web Dashboard:</b>\n"
         f"👉 <a href='{active_dash_link}'>Open Live Dashboard</a>\n"
         f"━━━━━━━━━━━━━━━━━━━━"
