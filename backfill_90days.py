@@ -1,20 +1,25 @@
 import os
+import io
 import duckdb
 import pandas as pd
 import numpy as np
 import requests
+from datetime import datetime, timedelta
 
 # ==========================================
 # CONFIGURATION & UNIVERSE
 # ==========================================
 DB_PATH = "data/candles.duckdb"
 SIGNALS_CSV = "data/signals.csv"
-LOOKBACK_DAYS = 30
+
+# Date Window: 1 August 2026 to present
+START_DATE = datetime(2026, 8, 1)
+END_DATE = datetime(2026, 9, 5)
+
 TARGET_X = 3.0
 MIN_PRICE = 100.0
 MIN_MARKET_CAP = 51_000_000_000.0  # ₹51 Billion
 
-# Chandelier Exit Parameters
 CE_PERIOD = 22
 CE_MULTIPLIER = 3.0
 
@@ -69,8 +74,80 @@ def get_nifty_fo_symbols() -> set:
     }
 
 
-def compute_chandelier_exit(df: pd.DataFrame, period: int = 22, mult: float = 3.0) -> pd.DataFrame:
-    """Computes pure ATR and Chandelier Exit Long line."""
+def auto_ingest_missing_august():
+    """Fetches missing August Bhavcopies into DuckDB without external tools."""
+    print("🔍 Checking and updating candles.duckdb for August 2026 data...")
+    os.makedirs("data", exist_ok=True)
+    conn = duckdb.connect(DB_PATH)
+
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS ohlcv_candles (
+            symbol VARCHAR,
+            timestamp TIMESTAMP,
+            open DOUBLE,
+            high DOUBLE,
+            low DOUBLE,
+            close DOUBLE,
+            volume BIGINT,
+            series VARCHAR,
+            delivery_qty BIGINT,
+            delivery_pct DOUBLE
+        )
+    """)
+
+    curr_date = START_DATE
+    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
+
+    while curr_date <= END_DATE:
+        if curr_date.weekday() >= 5:
+            curr_date += timedelta(days=1)
+            continue
+
+        d_str = curr_date.strftime("%d%m%Y")
+        date_iso = curr_date.strftime("%Y-%m-%d")
+
+        exists = conn.execute(
+            f"SELECT COUNT(*) FROM ohlcv_candles WHERE CAST(timestamp AS DATE) = '{date_iso}'"
+        ).fetchone()[0]
+
+        if exists == 0:
+            url = f"https://archives.nseindia.com/products/content/sec_bhavdata_full_{d_str}.csv"
+            try:
+                resp = requests.get(url, headers=headers, timeout=10)
+                if resp.status_code == 200:
+                    raw_df = pd.read_csv(io.StringIO(resp.text))
+                    raw_df.columns = [c.strip().upper() for c in raw_df.columns]
+
+                    eq_df = raw_df[raw_df['SERIES'].str.strip() == 'EQ'].copy()
+                    eq_df['timestamp'] = pd.to_datetime(eq_df['DATE1'].str.strip(), format="%d-%b-%Y")
+                    eq_df['symbol'] = eq_df['SYMBOL'].str.strip()
+                    eq_df['open'] = pd.to_numeric(eq_df['OPEN_PRICE'], errors='coerce')
+                    eq_df['high'] = pd.to_numeric(eq_df['HIGH_PRICE'], errors='coerce')
+                    eq_df['low'] = pd.to_numeric(eq_df['LOW_PRICE'], errors='coerce')
+                    eq_df['close'] = pd.to_numeric(eq_df['CLOSE_PRICE'], errors='coerce')
+                    eq_df['volume'] = pd.to_numeric(eq_df['TTL_TRD_QNTY'], errors='coerce').fillna(0).astype('int64')
+                    eq_df['series'] = 'EQ'
+                    eq_df['delivery_qty'] = pd.to_numeric(eq_df['DELIV_QTY'], errors='coerce').fillna(0).astype('int64')
+                    eq_df['delivery_pct'] = pd.to_numeric(eq_df['DELIV_PER'], errors='coerce').fillna(0.0)
+
+                    insert_df = eq_df[[
+                        'symbol', 'timestamp', 'open', 'high', 'low', 'close',
+                        'volume', 'series', 'delivery_qty', 'delivery_pct'
+                    ]].dropna(subset=['symbol', 'close'])
+
+                    conn.register("tmp_insert", insert_df)
+                    conn.execute("INSERT INTO ohlcv_candles SELECT * FROM tmp_insert")
+                    print(f"📥 Successfully ingested Bhavcopy for {date_iso}")
+            except Exception as e:
+                print(f"⚠️ Market holiday or download error on {date_iso}: {e}")
+
+        curr_date += timedelta(days=1)
+
+    conn.close()
+
+
+def compute_chandelier_exit(df: pd.DataFrame, period: int = 22, mult: float = 3.0):
+    """Calculates True Range, Smoothed ATR, and Chandelier Exit Long Floor."""
     high = df['High']
     low = df['Low']
     close_prev = df['Close'].shift(1)
@@ -80,21 +157,16 @@ def compute_chandelier_exit(df: pd.DataFrame, period: int = 22, mult: float = 3.
     tr3 = (low - close_prev).abs()
     tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
 
-    # Wilder's smoothed ATR
-    atr = tr.ewm(alpha=1/period, min_periods=period, adjust=False).mean()
+    atr = tr.ewm(alpha=1 / period, min_periods=period, adjust=False).mean()
     highest_high = high.rolling(window=period, min_periods=period).max()
-
-    # Chandelier Exit Long Line
     ce_long = highest_high - (mult * atr)
     return ce_long, atr
 
 
-def run_orderflow_ce_scanner():
-    print(f"🚀 Running Pure Price-Action Engine: Chandelier Exit + Order Flow + Delta Force...")
+def run_august_to_date_backfill():
+    auto_ingest_missing_august()
 
-    if not os.path.exists(DB_PATH):
-        print(f"❌ Database not found at {DB_PATH}.")
-        return
+    print("🚀 Evaluating Chandelier Exit + Order Flow Engine (From 1 August 2026 to Present)...")
 
     fo_symbols = get_nifty_fo_symbols()
     conn = duckdb.connect(DB_PATH)
@@ -120,31 +192,26 @@ def run_orderflow_ce_scanner():
     conn.close()
 
     if df_raw.empty:
-        print("⚠️ No EQ candle data available.")
+        print("⚠️ No data found in database.")
         return
 
     df_raw["Symbol_Clean"] = df_raw["Symbol"].str.upper().str.strip()
     df_raw = df_raw[df_raw["Symbol_Clean"].isin(fo_symbols)].copy()
-
     df_raw["Date_DT"] = pd.to_datetime(df_raw["Date"])
-    cutoff_date = df_raw["Date_DT"].max() - pd.Timedelta(days=LOOKBACK_DAYS)
 
+    cutoff_date = pd.to_datetime("2026-08-01")
     valid_signals = []
 
     for symbol, df_sym in df_raw.groupby('Symbol'):
-        if len(df_sym) < CE_PERIOD + 5:
+        if len(df_sym) < 15:
             continue
 
         df = df_sym.copy().sort_values("Date_DT").reset_index(drop=True)
 
-        # 1. Chandelier Exit Calculation
         df['CE_Long'], df['ATR'] = compute_chandelier_exit(df, period=CE_PERIOD, mult=CE_MULTIPLIER)
-
-        # 2. Delta Volume Force Baselines
         df['Prev_Delta'] = df['Delta_Volume'].shift(1).fillna(0.0)
         df['Avg_Delta_5'] = df['Delta_Volume'].abs().shift(1).rolling(5, min_periods=3).mean().fillna(0.0)
 
-        # 3. Bar Dynamics
         df['Day_Range'] = (df['High'] - df['Low']).clip(lower=1e-5)
         df['Close_Location'] = ((df['Close'] - df['Low']) / df['Day_Range']).fillna(0.5)
 
@@ -153,20 +220,18 @@ def run_orderflow_ce_scanner():
             if row['Date_DT'] < cutoff_date or row['Close'] <= MIN_PRICE:
                 continue
 
-            # MCap Validation
             mcap_val = float(row.get('MarketCap', 0.0))
             if mcap_val > 0.0 and mcap_val < MIN_MARKET_CAP:
                 continue
 
-            # --- CONDITION 1: CHANDELIER EXIT BREAKOUT / RETENTION ---
-            # Price closes above the Chandelier line, confirming bullish institutional floor
+            # 1. Chandelier Exit condition
             cond_chandelier = (row['Close'] > row['CE_Long']) if pd.notna(row['CE_Long']) else True
-            cond_ce_flag = bool(row['CE_Buy_Flow'])
+            cond_ce_buy = bool(row['CE_Buy_Flow'])
 
-            # --- CONDITION 2: POSITIVE ORDER FLOW DELTA ---
+            # 2. Positive Order Flow Delta
             cond_order_flow = (row['Order_Flow_Delta'] > 0) and (row['Delta_Volume'] > 0)
 
-            # --- CONDITION 3: DELTA VOLUME FORCE (SURGE) ---
+            # 3. Delta Volume Force (Surge)
             prev_d = row['Prev_Delta']
             curr_d = row['Delta_Volume']
             avg_d5 = row['Avg_Delta_5']
@@ -177,8 +242,7 @@ def run_orderflow_ce_scanner():
             cond_surge_avg = curr_d >= (2.0 * avg_d5)
             cond_delta_force = cond_surge_prev and cond_surge_avg
 
-            # Strictly Price Action & Order Flow Verification
-            if not (cond_chandelier and cond_ce_flag and cond_order_flow and cond_delta_force):
+            if not (cond_chandelier and cond_ce_buy and cond_order_flow and cond_delta_force):
                 continue
 
             deliv_score = float(np.clip((row['DeliveryPct'] / 70.0 * 50.0), 10, 50))
@@ -186,18 +250,15 @@ def run_orderflow_ce_scanner():
             brs_score = round(deliv_score + close_score, 2)
 
             entry = round(float(row['High']) + 0.05, 2)
-            # Use Chandelier Exit or Low for Stop Loss
             ce_stop = round(float(row['CE_Long']), 2) if pd.notna(row['CE_Long']) else round(float(row['Low']), 2)
             sl = min(round(float(row['Low']), 2), ce_stop)
             risk = max(entry - sl, float(row['Close']) * 0.01)
             target = round(entry + (risk * TARGET_X), 2)
 
             deliv_pct_val = round(float(np.nan_to_num(row['DeliveryPct'], nan=0.0)), 2)
-            deliv_qty_val = int(np.nan_to_num(row['DeliveryQty'], nan=0))
-            volume_val = int(np.nan_to_num(row['Volume'], nan=0))
             surge_ratio = round(float(curr_d / (avg_d5 + 1e-5)), 2)
 
-            # Columns compatible with index.html
+            # Pure price action and order flow data schema
             valid_signals.append({
                 "Date": row['Date_DT'].strftime("%d-%m-%Y"),
                 "Date_DT": row['Date_DT'],
@@ -210,30 +271,25 @@ def run_orderflow_ce_scanner():
                 "SL": sl,
                 "Target": target,
                 "Close": round(float(row['Close']), 2),
-                "Volume": volume_val,
-                "EMA20": deliv_pct_val,             # Feeds table column cleanly
-                "ADX14": surge_ratio,              # Replaced ADX with Delta Force Surge Ratio
-                "ema": deliv_pct_val,
-                "adx": surge_ratio,
-                "DeliveryQty": deliv_qty_val,
+                "Volume": int(np.nan_to_num(row['Volume'], nan=0)),
+                "DeliveryQty": int(np.nan_to_num(row['DeliveryQty'], nan=0)),
                 "DeliveryPct": deliv_pct_val,
-                "DelivSpikeRatio": surge_ratio,
-                "Daily_RSI": surge_ratio
+                "DelivSpikeRatio": surge_ratio
             })
 
     os.makedirs("data", exist_ok=True)
     if valid_signals:
         df_out = pd.DataFrame(valid_signals).sort_values(by=['Date_DT', 'BRS_Score'], ascending=[False, False])
         df_out.drop(columns=['Date_DT']).to_csv(SIGNALS_CSV, index=False)
-        print(f"✅ Exported {len(df_out)} pure Order Flow + CE signals to {SIGNALS_CSV}.")
+        print(f"✅ Generated {len(df_out)} signals from 1 August 2026 to present into {SIGNALS_CSV}!")
     else:
         pd.DataFrame(columns=[
             "Date", "Symbol", "Timeframe", "Type", "Pattern", "BRS_Score",
-            "Entry", "SL", "Target", "Close", "Volume", "EMA20", "ADX14", "ema", "adx",
-            "DeliveryQty", "DeliveryPct", "DelivSpikeRatio", "Daily_RSI"
+            "Entry", "SL", "Target", "Close", "Volume",
+            "DeliveryQty", "DeliveryPct", "DelivSpikeRatio"
         ]).to_csv(SIGNALS_CSV, index=False)
-        print(f"⚠️ 0 signals found under pure Order Flow & CE rules. Cleared {SIGNALS_CSV}.")
+        print(f"⚠️ No signals passed between 1 August 2026 and present.")
 
 
 if __name__ == "__main__":
-    run_orderflow_ce_scanner()
+    run_august_to_date_backfill()
