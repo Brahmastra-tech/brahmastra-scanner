@@ -1,7 +1,16 @@
-Change
+import os
+import time
+import duckdb
+import pandas as pd
+import numpy as np
+import requests
 
-Immediately after this block:
-
+# ==========================================
+# CONFIGURATION & ENVIRONMENT
+# ==========================================
+DB_PATH = "data/candles.duckdb"
+SIGNALS_CSV = "data/signals.csv"
+TARGET_X = 3.0
 self.latest = sector_df.copy()
 
 add:
