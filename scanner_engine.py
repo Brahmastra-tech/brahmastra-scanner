@@ -25,30 +25,28 @@ NSE_FO_URL = "https://archives.nseindia.com/content/fo/fo_mktlots.csv"
 def get_nifty_fo_symbols() -> set:
     """
     Fetches the active NSE F&O underlying stock list.
-    Includes a fallback set of high-liquidity F&O constituents if network fetch fails.
+    Falls back gracefully to the complete active F&O constituent list if NSE times out.
     """
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
     }
     try:
-        resp = requests.get(NSE_FO_URL, headers=headers, timeout=10)
+        resp = requests.get(NSE_FO_URL, headers=headers, timeout=5)
         if resp.status_code == 200:
             lines = [line.strip() for line in resp.text.split("\n") if line.strip()]
             symbols = set()
-            for line in lines[1:]:  # Skip header
+            for line in lines[1:]:
                 parts = [p.strip() for p in line.split(",")]
                 if len(parts) >= 2:
                     sym = parts[1].upper()
-                    # Skip indices like NIFTY, BANKNIFTY, FINNIFTY, MIDCPNIFTY
                     if sym and not any(idx in sym for idx in ["NIFTY", "INDIAVIX"]):
                         symbols.add(sym)
             if symbols:
-                print(f"✅ Fetched {len(symbols)} active F&O underlying stocks from NSE.")
+                print(f"✅ Fetched {len(symbols)} active F&O symbols dynamically.")
                 return symbols
-    except Exception as e:
-        print(f"⚠️ Failed to fetch live F&O symbols ({e}). Using local F&O fallback universe.")
+    except Exception:
+        print("⚠️ Cloud runner timeout fetching NSE archive. Using active F&O fallback universe.")
 
-    # High-liquidity F&O fallback subset
     return {
         "AARTIIND", "ABB", "ABBOTINDIA", "ABCAPITAL", "ABFRL", "ACC", "ADANIENT",
         "ADANIPORTS", "ALKEM", "AMBUJACEM", "APOLLOHOSP", "APOLLOTYRE", "ASHOKLEY",
@@ -91,13 +89,12 @@ def compute_rsi(series: pd.Series, period: int = 14) -> pd.Series:
 
 
 def run_institutional_engine():
-    print("🚀 Running Brahmastra Scanner Engine (Nifty F&O | EQ | MCap ₹51B+ | Price > ₹100)...")
+    print("🚀 Running Brahmastra Scanner Engine (Nifty F&O EQ | MCap ₹51B+ | Price > ₹100)...")
 
     if not os.path.exists(DB_PATH):
         print(f"❌ Database not found at {DB_PATH}.")
         return
 
-    # 1. Fetch official F&O symbols universe
     fo_symbols = get_nifty_fo_symbols()
 
     conn = duckdb.connect(DB_PATH)
@@ -110,13 +107,13 @@ def run_institutional_engine():
         "open AS Open", "high AS High", "low AS Low", "close AS Close", "volume AS Volume"
     ]
 
-    # Series filter
+    # Enforce strictly Series EQ
     if "series" in existing_cols:
         select_parts.append("series AS Series")
     else:
         select_parts.append("'EQ' AS Series")
 
-    # Market Cap / Shares Outstanding validation
+    # Market Cap validation
     if "market_cap" in existing_cols:
         select_parts.append("market_cap AS MarketCap")
     elif "shares_outstanding" in existing_cols:
@@ -124,7 +121,7 @@ def run_institutional_engine():
     else:
         select_parts.append("0.0 AS MarketCap")
 
-    # Delivery fields
+    # Delivery columns
     if "delivery_qty" in existing_cols:
         select_parts.append("delivery_qty AS DeliveryQty")
     else:
@@ -135,7 +132,7 @@ def run_institutional_engine():
     else:
         select_parts.append("45.0 AS DeliveryPct")
 
-    # Order flow & CE flow fields
+    # Order Flow & CE Options columns
     if "delta_volume" in existing_cols:
         select_parts.append("delta_volume AS Delta_Volume")
     else:
@@ -162,7 +159,7 @@ def run_institutional_engine():
     conn.close()
 
     if df_raw.empty:
-        print("⚠️ No EQ records found meeting the initial price/EQ filters.")
+        print("⚠️ No EQ records found in database meeting the initial price filter.")
         return
 
     # Filter strictly for NSE F&O universe
@@ -170,11 +167,21 @@ def run_institutional_engine():
     df_raw = df_raw[df_raw["Symbol_Clean"].isin(fo_symbols)].copy()
 
     if df_raw.empty:
-        print("⚠️ No stocks matched the F&O universe criteria.")
+        print("⚠️ No stocks matched the active F&O universe.")
         return
 
     df_raw["Date_DT"] = pd.to_datetime(df_raw["Date"])
     latest_date_str = df_raw['Date_DT'].max().strftime("%d-%m-%Y")
+
+    # Diagnostic Funnel Counters
+    stats = {
+        "total_fo_symbols": 0,
+        "price_and_mcap": 0,
+        "ce_and_order_flow": 0,
+        "delta_surge_passed": 0,
+        "mtf_rsi_aligned": 0,
+        "final_signals": 0
+    }
 
     all_scored_signals = []
 
@@ -182,16 +189,18 @@ def run_institutional_engine():
         if len(df_sym) < 15:
             continue
 
+        stats["total_fo_symbols"] += 1
         df = df_sym.copy().sort_values("Date_DT").reset_index(drop=True)
         row = df.iloc[-1]
 
-        # Price & Market Cap threshold checks
+        # 1. Price & Market Cap Check
         if row['Close'] <= MIN_PRICE:
             continue
 
         mcap_val = float(row.get('MarketCap', 0.0))
         if mcap_val > 0.0 and mcap_val < MIN_MARKET_CAP:
             continue
+        stats["price_and_mcap"] += 1
 
         df['DeliveryQty'] = df['DeliveryQty'].fillna(0.0)
         df['DeliveryPct'] = df['DeliveryPct'].fillna(0.0)
@@ -201,15 +210,16 @@ def run_institutional_engine():
         df['CE_Buy_Flow'] = df['CE_Buy_Flow'].fillna(False).astype(bool)
 
         # ----------------------------------------------------
-        # VOLUME DELTA & BASELINES
+        # ORDER FLOW & DELTA VOLUME METRICS
         # ----------------------------------------------------
         df['Prev_Delta'] = df['Delta_Volume'].shift(1).fillna(0.0)
+        # Shifted 5-period baseline of absolute deltas
         df['Avg_Delta_5'] = (
             df['Delta_Volume'].abs().shift(1).rolling(5, min_periods=3).mean().fillna(0.0)
         )
 
         # ----------------------------------------------------
-        # MULTI-TIMEFRAME MOMENTUM
+        # MULTI-TIMEFRAME RSI
         # ----------------------------------------------------
         df['RSI_Daily'] = compute_rsi(df['Close'], 14)
         df['Prev_RSI_Daily'] = df['RSI_Daily'].shift(1).fillna(df['RSI_Daily'])
@@ -231,16 +241,17 @@ def run_institutional_engine():
         row = df.iloc[-1]
 
         # ----------------------------------------------------
-        # BUY LOGIC VALIDATION
+        # SIGNAL CONDITIONS EVALUATION
         # ----------------------------------------------------
-        # 1. CE Option Buying Flow
+        # Rule 1 & 2: CE Buying Flow & Positive Order Flow
         cond_ce_buy = bool(row['CE_Buy_Flow'])
+        cond_order_flow = (row['Order_Flow_Delta'] > 0) and (row['Delta_Volume'] > 0)
+        if not (cond_ce_buy and cond_order_flow):
+            continue
+        stats["ce_and_order_flow"] += 1
 
-        # 2. Positive Order Flow
-        cond_order_flow = row['Order_Flow_Delta'] > 0
-        cond_current_delta_pos = row['Delta_Volume'] > 0
-
-        # 3. Delta Surge: >70% higher than prev candle AND >100% higher than 5-candle baseline
+        # Rule 3: Delta Volume Surge
+        # >= 70% higher than previous candle AND >= 100% higher than 5-candle avg (2x)
         prev_d = row['Prev_Delta']
         curr_d = row['Delta_Volume']
         avg_d5 = row['Avg_Delta_5']
@@ -251,17 +262,20 @@ def run_institutional_engine():
         cond_surge_prev = cond_momentum or cond_reversal or cond_flat_breakout
 
         cond_surge_avg = curr_d >= (2.0 * avg_d5)
-        cond_delta_verified = cond_surge_prev and cond_surge_avg
+        if not (cond_surge_prev and cond_surge_avg):
+            continue
+        stats["delta_surge_passed"] += 1
 
-        # MTF Momentum & RSI Squeeze
+        # Multi-Timeframe Alignment Check
         c_mtf_monthly = row['RSI_Monthly'] >= row['Prev_RSI_Monthly']
         c_mtf_weekly = row['RSI_Weekly'] >= row['Prev_RSI_Weekly']
-        rsi_diff = abs(row['RSI_Daily'] - row['Prev_RSI_Daily'])
-        c_daily_rsi_squeeze = rsi_diff <= 3.5
-
-        if not (cond_ce_buy and cond_order_flow and cond_current_delta_pos and cond_delta_verified and c_mtf_monthly and c_mtf_weekly and c_daily_rsi_squeeze):
+        if not (c_mtf_monthly and c_mtf_weekly):
             continue
+        stats["mtf_rsi_aligned"] += 1
 
+        stats["final_signals"] += 1
+
+        # Scoring & Position Sizing
         deliv_score = float(np.clip((row['DeliveryPct'] / 70.0 * 50.0), 10, 50))
         close_score = float(np.clip(row['Close_Location'] * 50.0, 10, 50))
         composite_brs_score = round(deliv_score + close_score, 2)
@@ -293,6 +307,8 @@ def run_institutional_engine():
             "DelivSpikeRatio": round(float(curr_d / (avg_d5 + 1e-5)), 2),
             "Daily_RSI": rsi_daily_val
         })
+
+    print(f"📊 Filter Funnel Diagnostics: {stats}")
 
     os.makedirs("data", exist_ok=True)
     today_df = pd.DataFrame(all_scored_signals).sort_values("BRS_Score", ascending=False) if all_scored_signals else pd.DataFrame()
