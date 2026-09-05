@@ -13,8 +13,6 @@ SIGNALS_CSV = "data/signals.csv"
 TARGET_X = 3.0
 self.latest = sector_df.copy()
 
-add:
-
 # -------------------------------------------------
 # Sector Confirmation
 # -------------------------------------------------
