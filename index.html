@@ -275,7 +275,7 @@
         let allData = [];
         let filteredData = [];
 
-        // Fetch signals.csv with query param to bypass Telegram / Webview cache
+        // Fetch signals.csv with query param to bypass cache
         fetch('data/signals.csv?t=' + Date.now())
             .then(response => {
                 if (!response.ok) {
@@ -327,9 +327,8 @@
                 const sl = parseFloat(row.SL || row.sl || 0).toFixed(2);
                 const target = parseFloat(row.Target || row.target || 0).toFixed(2);
                 
-                // Fallbacks for Delivery % and Delta Volume Surge
-                const delivPct = parseFloat(row.DeliveryPct || row.EMA20 || row.ema || 0).toFixed(1);
-                const deltaSurge = parseFloat(row.DelivSpikeRatio || row.ADX14 || row.adx || 1.0).toFixed(2);
+                const delivPct = parseFloat(row.DeliveryPct || 0).toFixed(1);
+                const deltaSurge = parseFloat(row.DelivSpikeRatio || 1.0).toFixed(2);
 
                 const badgeClass = pattern.includes('BREAKDOWN') ? 'badge-breakdown' : 'badge-breakout';
                 const tvUrl = `https://in.tradingview.com/chart/?symbol=NSE:${symbol}`;
@@ -359,7 +358,6 @@
             const patternVal = document.getElementById('patternFilter').value;
             const dateVal = document.getElementById('dateFilter').value;
 
-            // Formats HTML date picker (YYYY-MM-DD) to CSV date format (DD-MM-YYYY)
             let formattedSearchDate = '';
             if (dateVal) {
                 const parts = dateVal.split('-');
