@@ -19,6 +19,65 @@ TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN") or os.getenv("TELEGRAM_TOKE
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID") or os.getenv("CHAT_ID")
 DASHBOARD_URL = "https://brahmastra-tech.github.io/brahmastra-scanner/"
 
+NSE_FO_URL = "https://archives.nseindia.com/content/fo/fo_mktlots.csv"
+
+
+def get_nifty_fo_symbols() -> set:
+    """
+    Fetches the active NSE F&O underlying stock list.
+    Includes a fallback set of high-liquidity F&O constituents if network fetch fails.
+    """
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+    }
+    try:
+        resp = requests.get(NSE_FO_URL, headers=headers, timeout=10)
+        if resp.status_code == 200:
+            lines = [line.strip() for line in resp.text.split("\n") if line.strip()]
+            symbols = set()
+            for line in lines[1:]:  # Skip header
+                parts = [p.strip() for p in line.split(",")]
+                if len(parts) >= 2:
+                    sym = parts[1].upper()
+                    # Skip indices like NIFTY, BANKNIFTY, FINNIFTY, MIDCPNIFTY
+                    if sym and not any(idx in sym for idx in ["NIFTY", "INDIAVIX"]):
+                        symbols.add(sym)
+            if symbols:
+                print(f"✅ Fetched {len(symbols)} active F&O underlying stocks from NSE.")
+                return symbols
+    except Exception as e:
+        print(f"⚠️ Failed to fetch live F&O symbols ({e}). Using local F&O fallback universe.")
+
+    # High-liquidity F&O fallback subset
+    return {
+        "AARTIIND", "ABB", "ABBOTINDIA", "ABCAPITAL", "ABFRL", "ACC", "ADANIENT",
+        "ADANIPORTS", "ALKEM", "AMBUJACEM", "APOLLOHOSP", "APOLLOTYRE", "ASHOKLEY",
+        "ASIANPAINT", "ASTRAL", "ATUL", "AUBANK", "AUROPHARMA", "AXISBANK", "BAJAJ-AUTO",
+        "BAJAJFINSV", "BAJFINANCE", "BALKRISIND", "BALRAMCHIN", "BANDHANBNK", "BANKBARODA",
+        "BATAINDIA", "BEL", "BERGEPAINT", "BHARATFORG", "BHARTIARTL", "BHEL", "BIOCON",
+        "BOSCHLTD", "BPCL", "BRITANNIA", "BSOFT", "CANBK", "CANFINHOME", "CHAMBLFERT",
+        "CHOLAFIN", "CIPLA", "COALINDIA", "COFORGE", "COLPAL", "CONCOR", "COROMANDEL",
+        "CROMPTON", "CUB", "CUMMINSIND", "DABUR", "DALBHARAT", "DEEPAKNTR", "DIVISLAB",
+        "DIXON", "DLF", "DRREDDY", "EICHERMOT", "ESCORTS", "EXIDEIND", "FEDERALBNK",
+        "GAIL", "GLENMARK", "GMRINFRA", "GNFC", "GODREJCP", "GODREJPROP", "GRANULES",
+        "GRASIM", "GUJGASLTD", "HAL", "HAVELLS", "HCLTECH", "HDFCAMC", "HDFCBANK",
+        "HDFCLIFE", "HEROMOTOCO", "HINDALCO", "HINDPETRO", "HINDUNILVR", "ICICIBANK",
+        "ICICIGI", "ICICIPRULI", "IDEA", "IDFC", "IDFCFIRSTB", "IEX", "IGL", "INDHOTEL",
+        "INDIACEM", "INDIAMART", "INDIGO", "INDUSINDBK", "INDUSTOWER", "INFY", "IOC",
+        "IPCALAB", "IRCTC", "ITC", "JINDALSTEL", "JKCEMENT", "JSWSTEEL", "JUBLFOOD",
+        "KOTAKBANK", "LALPATHLAB", "LAURUSLABS", "LICHSGFIN", "LT", "LTIM", "LTTS",
+        "LUPIN", "M&M", "M&MFIN", "MANAPPURAM", "MARICO", "MARUTI", "MCDOWELL-N",
+        "MCX", "METROPOLIS", "MFSL", "MGL", "MOTHERSON", "MPHASIS", "MRF", "MUTHOOTFIN",
+        "NATIONALUM", "NAUKRI", "NAVINFLUOR", "NESTLEIND", "NMDC", "NTPC", "OBEROIRLTY",
+        "OFSS", "ONGC", "PAGEIND", "PEL", "PERSISTENT", "PETRONET", "PFC", "PIDILITIND",
+        "PIIND", "PNB", "POLYCAB", "POONAWALLA", "POWERGRID", "PVRINOX", "RAMCOCEM",
+        "RBLBANK", "RECLTD", "RELIANCE", "SAIL", "SBICARD", "SBILIFE", "SBIN", "SHREECEM",
+        "SHRIRAMFIN", "SIEMENS", "SRF", "SUNPHARMA", "SUNTV", "SYNGENE", "TATACHEM",
+        "TATACOMM", "TATACONSUM", "TATAMOTORS", "TATAPOWER", "TATASTEEL", "TCS", "TECHM",
+        "TITAN", "TORNTPHARM", "TRENT", "TVSMOTOR", "UBL", "ULTRACEMCO", "UPL", "VEDL",
+        "VOLTAS", "WIPRO", "ZEEL"
+    }
+
 
 def compute_rsi(series: pd.Series, period: int = 14) -> pd.Series:
     delta = series.diff()
@@ -32,11 +91,14 @@ def compute_rsi(series: pd.Series, period: int = 14) -> pd.Series:
 
 
 def run_institutional_engine():
-    print("🚀 Running Brahmastra Scanner Engine (Nifty EQ | MCap ₹51B+ | Price > ₹100)...")
+    print("🚀 Running Brahmastra Scanner Engine (Nifty F&O | EQ | MCap ₹51B+ | Price > ₹100)...")
 
     if not os.path.exists(DB_PATH):
         print(f"❌ Database not found at {DB_PATH}.")
         return
+
+    # 1. Fetch official F&O symbols universe
+    fo_symbols = get_nifty_fo_symbols()
 
     conn = duckdb.connect(DB_PATH)
     cols_info = conn.execute("DESCRIBE ohlcv_candles").fetchall()
@@ -48,13 +110,13 @@ def run_institutional_engine():
         "open AS Open", "high AS High", "low AS Low", "close AS Close", "volume AS Volume"
     ]
 
-    # 1. SERIES Filter: Ensure strictly Equity ('EQ')
+    # Series filter
     if "series" in existing_cols:
         select_parts.append("series AS Series")
     else:
         select_parts.append("'EQ' AS Series")
 
-    # 2. Market Cap / Shares Outstanding validation
+    # Market Cap / Shares Outstanding validation
     if "market_cap" in existing_cols:
         select_parts.append("market_cap AS MarketCap")
     elif "shares_outstanding" in existing_cols:
@@ -62,7 +124,7 @@ def run_institutional_engine():
     else:
         select_parts.append("0.0 AS MarketCap")
 
-    # 3. Delivery fields
+    # Delivery fields
     if "delivery_qty" in existing_cols:
         select_parts.append("delivery_qty AS DeliveryQty")
     else:
@@ -73,7 +135,7 @@ def run_institutional_engine():
     else:
         select_parts.append("45.0 AS DeliveryPct")
 
-    # 4. Order Flow & CE Option Flow fields
+    # Order flow & CE flow fields
     if "delta_volume" in existing_cols:
         select_parts.append("delta_volume AS Delta_Volume")
     else:
@@ -103,6 +165,14 @@ def run_institutional_engine():
         print("⚠️ No EQ records found meeting the initial price/EQ filters.")
         return
 
+    # Filter strictly for NSE F&O universe
+    df_raw["Symbol_Clean"] = df_raw["Symbol"].str.upper().str.strip()
+    df_raw = df_raw[df_raw["Symbol_Clean"].isin(fo_symbols)].copy()
+
+    if df_raw.empty:
+        print("⚠️ No stocks matched the F&O universe criteria.")
+        return
+
     df_raw["Date_DT"] = pd.to_datetime(df_raw["Date"])
     latest_date_str = df_raw['Date_DT'].max().strftime("%d-%m-%Y")
 
@@ -115,9 +185,7 @@ def run_institutional_engine():
         df = df_sym.copy().sort_values("Date_DT").reset_index(drop=True)
         row = df.iloc[-1]
 
-        # ----------------------------------------------------
-        # PRICE & MARKET CAP FILTER
-        # ----------------------------------------------------
+        # Price & Market Cap threshold checks
         if row['Close'] <= MIN_PRICE:
             continue
 
@@ -133,7 +201,7 @@ def run_institutional_engine():
         df['CE_Buy_Flow'] = df['CE_Buy_Flow'].fillna(False).astype(bool)
 
         # ----------------------------------------------------
-        # VOLUME DELTA METRICS
+        # VOLUME DELTA & BASELINES
         # ----------------------------------------------------
         df['Prev_Delta'] = df['Delta_Volume'].shift(1).fillna(0.0)
         df['Avg_Delta_5'] = (
@@ -141,7 +209,7 @@ def run_institutional_engine():
         )
 
         # ----------------------------------------------------
-        # MULTI-TIMEFRAME RSI
+        # MULTI-TIMEFRAME MOMENTUM
         # ----------------------------------------------------
         df['RSI_Daily'] = compute_rsi(df['Close'], 14)
         df['Prev_RSI_Daily'] = df['RSI_Daily'].shift(1).fillna(df['RSI_Daily'])
@@ -172,7 +240,7 @@ def run_institutional_engine():
         cond_order_flow = row['Order_Flow_Delta'] > 0
         cond_current_delta_pos = row['Delta_Volume'] > 0
 
-        # 3. Delta Volume Expansion (>70% vs prev, >100% vs 5-candle avg)
+        # 3. Delta Surge: >70% higher than prev candle AND >100% higher than 5-candle baseline
         prev_d = row['Prev_Delta']
         curr_d = row['Delta_Volume']
         avg_d5 = row['Avg_Delta_5']
@@ -248,7 +316,7 @@ def run_institutional_engine():
         final_export_df = combined_df
 
     final_export_df.to_csv(SIGNALS_CSV, index=False)
-    print(f"✅ Saved {len(today_df)} dynamic EQ candidates (MCap > 51B & Price > 100) for {latest_date_str}.")
+    print(f"✅ Saved {len(today_df)} dynamic Nifty F&O candidates for {latest_date_str}.")
 
     top_candidates = today_df.to_dict('records') if not today_df.empty else []
     try:
@@ -278,7 +346,7 @@ def send_telegram_alert(signal: dict):
     message = (
         f"🏛️ <b>BRAHMASTRA PRE-BREAKOUT WATCHLIST</b>\n"
         f"━━━━━━━━━━━━━━━━━━━━\n"
-        f"📈 <b>Stock:</b> {symbol} (NSE EQ | MCap ₹51B+)\n"
+        f"📈 <b>Stock:</b> {symbol} (NSE F&O EQ)\n"
         f"⭐ <b>BRS Score:</b> {brs:.2f} / 100\n"
         f"🎯 <b>Setup:</b> Order Flow + Delta Surge ({spike_ratio:.1f}x)\n"
         f"⏱ <b>Date:</b> {setup_date}\n\n"
@@ -306,8 +374,8 @@ def send_summary_telegram(candidates: list, date_str: str):
     message = (
         f"🏁 <b>DAILY BRAHMASTRA SCAN COMPLETE ({date_str})</b>\n"
         f"━━━━━━━━━━━━━━━━━━━━\n"
-        f"📊 <b>High-Conviction EQ Setups Found:</b> {len(candidates)}\n"
-        f"🔍 <b>Filters Applied:</b> NSE EQ | MCap ₹51B+ | Price > ₹100\n\n"
+        f"📊 <b>High-Conviction F&O Setups Found:</b> {len(candidates)}\n"
+        f"🔍 <b>Universe:</b> NSE F&O (EQ Only | MCap ₹51B+ | Price > ₹100)\n\n"
         f"🌐 <b>Interactive Web Dashboard:</b>\n"
         f"👉 <a href='{DASHBOARD_URL}'>{DASHBOARD_URL}</a>\n"
         f"━━━━━━━━━━━━━━━━━━━━"
