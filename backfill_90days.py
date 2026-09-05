@@ -6,7 +6,7 @@ import requests
 
 DB_PATH = "data/candles.duckdb"
 SIGNALS_CSV = "data/signals.csv"
-LOOKBACK_DAYS = 7
+LOOKBACK_DAYS = 30
 TARGET_X = 3.0
 MIN_PRICE = 100.0
 MIN_MARKET_CAP = 51_000_000_000.0
