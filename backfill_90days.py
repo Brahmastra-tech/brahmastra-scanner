@@ -70,8 +70,8 @@ def compute_rsi(series: pd.Series, period: int = 14) -> pd.Series:
     rsi = 100.0 - (100.0 / (1.0 + rs))
     return rsi.fillna(50.0)
 
-def run_clean_7d_backfill():
-    print("⏳ Running Clean 7-Day History Generation...")
+def run_clean_30d_backfill():
+    print("⏳ Running Clean 30-Day History Generation...")
 
     if not os.path.exists(DB_PATH):
         print(f"❌ Database not found at {DB_PATH}.")
