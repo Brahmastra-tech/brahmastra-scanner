@@ -5,16 +5,21 @@ import numpy as np
 import requests
 
 # ==========================================
-# CONFIGURATION
+# CONFIGURATION & UNIVERSE
 # ==========================================
 DB_PATH = "data/candles.duckdb"
 SIGNALS_CSV = "data/signals.csv"
 LOOKBACK_DAYS = 30
 TARGET_X = 3.0
 MIN_PRICE = 100.0
-MIN_MARKET_CAP = 51_000_000_000.0
+MIN_MARKET_CAP = 51_000_000_000.0  # ₹51 Billion
+
+# Chandelier Exit Parameters
+CE_PERIOD = 22
+CE_MULTIPLIER = 3.0
 
 NSE_FO_URL = "https://archives.nseindia.com/content/fo/fo_mktlots.csv"
+
 
 def get_nifty_fo_symbols() -> set:
     headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
@@ -63,18 +68,29 @@ def get_nifty_fo_symbols() -> set:
         "VOLTAS", "WIPRO", "ZEEL"
     }
 
-def compute_rsi(series: pd.Series, period: int = 14) -> pd.Series:
-    delta = series.diff()
-    gain = delta.clip(lower=0)
-    loss = -1 * delta.clip(upper=0)
-    avg_gain = gain.ewm(alpha=1/period, min_periods=period, adjust=False).mean()
-    avg_loss = loss.ewm(alpha=1/period, min_periods=period, adjust=False).mean()
-    rs = avg_gain / (avg_loss + 1e-5)
-    rsi = 100.0 - (100.0 / (1.0 + rs))
-    return rsi.fillna(50.0)
 
-def run_clean_30d_backfill():
-    print(f"⏳ Running Clean {LOOKBACK_DAYS}-Day History Generation...")
+def compute_chandelier_exit(df: pd.DataFrame, period: int = 22, mult: float = 3.0) -> pd.DataFrame:
+    """Computes pure ATR and Chandelier Exit Long line."""
+    high = df['High']
+    low = df['Low']
+    close_prev = df['Close'].shift(1)
+
+    tr1 = high - low
+    tr2 = (high - close_prev).abs()
+    tr3 = (low - close_prev).abs()
+    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+
+    # Wilder's smoothed ATR
+    atr = tr.ewm(alpha=1/period, min_periods=period, adjust=False).mean()
+    highest_high = high.rolling(window=period, min_periods=period).max()
+
+    # Chandelier Exit Long Line
+    ce_long = highest_high - (mult * atr)
+    return ce_long, atr
+
+
+def run_orderflow_ce_scanner():
+    print(f"🚀 Running Pure Price-Action Engine: Chandelier Exit + Order Flow + Delta Force...")
 
     if not os.path.exists(DB_PATH):
         print(f"❌ Database not found at {DB_PATH}.")
@@ -98,10 +114,13 @@ def run_clean_30d_backfill():
     select_parts.append("order_flow_delta AS Order_Flow_Delta" if "order_flow_delta" in existing_cols else "CASE WHEN close >= open THEN 1.0 ELSE -1.0 END AS Order_Flow_Delta")
     select_parts.append("ce_buy_flow AS CE_Buy_Flow" if "ce_buy_flow" in existing_cols else "TRUE AS CE_Buy_Flow")
 
-    df_raw = conn.execute(f"SELECT {', '.join(select_parts)} FROM ohlcv_candles WHERE UPPER(series) = 'EQ' AND close > {MIN_PRICE} ORDER BY symbol, timestamp ASC").df()
+    df_raw = conn.execute(
+        f"SELECT {', '.join(select_parts)} FROM ohlcv_candles WHERE UPPER(series) = 'EQ' AND close > {MIN_PRICE} ORDER BY symbol, timestamp ASC"
+    ).df()
     conn.close()
 
     if df_raw.empty:
+        print("⚠️ No EQ candle data available.")
         return
 
     df_raw["Symbol_Clean"] = df_raw["Symbol"].str.upper().str.strip()
@@ -110,30 +129,22 @@ def run_clean_30d_backfill():
     df_raw["Date_DT"] = pd.to_datetime(df_raw["Date"])
     cutoff_date = df_raw["Date_DT"].max() - pd.Timedelta(days=LOOKBACK_DAYS)
 
-    clean_signals = []
+    valid_signals = []
 
     for symbol, df_sym in df_raw.groupby('Symbol'):
-        if len(df_sym) < 15:
+        if len(df_sym) < CE_PERIOD + 5:
             continue
 
         df = df_sym.copy().sort_values("Date_DT").reset_index(drop=True)
+
+        # 1. Chandelier Exit Calculation
+        df['CE_Long'], df['ATR'] = compute_chandelier_exit(df, period=CE_PERIOD, mult=CE_MULTIPLIER)
+
+        # 2. Delta Volume Force Baselines
         df['Prev_Delta'] = df['Delta_Volume'].shift(1).fillna(0.0)
         df['Avg_Delta_5'] = df['Delta_Volume'].abs().shift(1).rolling(5, min_periods=3).mean().fillna(0.0)
 
-        df['RSI_Daily'] = compute_rsi(df['Close'], 14)
-        df['Prev_RSI_Daily'] = df['RSI_Daily'].shift(1).fillna(df['RSI_Daily'])
-
-        df_weekly = df.set_index('Date_DT').resample('W-FRI').agg({'Close': 'last'}).dropna()
-        df_weekly['RSI_Weekly'] = compute_rsi(df_weekly['Close'], 14) if len(df_weekly) >= 5 else 55.0
-        df_weekly['Prev_RSI_Weekly'] = df_weekly['RSI_Weekly'].shift(1) if len(df_weekly) >= 5 else 50.0
-
-        df_monthly = df.set_index('Date_DT').resample('ME').agg({'Close': 'last'}).dropna()
-        df_monthly['RSI_Monthly'] = compute_rsi(df_monthly['Close'], 14) if len(df_monthly) >= 2 else 55.0
-        df_monthly['Prev_RSI_Monthly'] = df_monthly['RSI_Monthly'].shift(1) if len(df_monthly) >= 2 else 50.0
-
-        df = pd.merge_asof(df, df_weekly[['RSI_Weekly', 'Prev_RSI_Weekly']], on='Date_DT', direction='backward').fillna(50.0)
-        df = pd.merge_asof(df, df_monthly[['RSI_Monthly', 'Prev_RSI_Monthly']], on='Date_DT', direction='backward').fillna(50.0)
-
+        # 3. Bar Dynamics
         df['Day_Range'] = (df['High'] - df['Low']).clip(lower=1e-5)
         df['Close_Location'] = ((df['Close'] - df['Low']) / df['Day_Range']).fillna(0.5)
 
@@ -142,24 +153,32 @@ def run_clean_30d_backfill():
             if row['Date_DT'] < cutoff_date or row['Close'] <= MIN_PRICE:
                 continue
 
+            # MCap Validation
             mcap_val = float(row.get('MarketCap', 0.0))
             if mcap_val > 0.0 and mcap_val < MIN_MARKET_CAP:
                 continue
 
-            cond_ce_buy = bool(row['CE_Buy_Flow'])
+            # --- CONDITION 1: CHANDELIER EXIT BREAKOUT / RETENTION ---
+            # Price closes above the Chandelier line, confirming bullish institutional floor
+            cond_chandelier = (row['Close'] > row['CE_Long']) if pd.notna(row['CE_Long']) else True
+            cond_ce_flag = bool(row['CE_Buy_Flow'])
+
+            # --- CONDITION 2: POSITIVE ORDER FLOW DELTA ---
             cond_order_flow = (row['Order_Flow_Delta'] > 0) and (row['Delta_Volume'] > 0)
 
+            # --- CONDITION 3: DELTA VOLUME FORCE (SURGE) ---
             prev_d = row['Prev_Delta']
             curr_d = row['Delta_Volume']
             avg_d5 = row['Avg_Delta_5']
 
-            cond_surge_prev = (prev_d > 0 and curr_d >= 1.70 * prev_d) or (prev_d < 0 and curr_d >= 1.70 * abs(prev_d)) or (prev_d == 0 and curr_d > 0)
+            cond_surge_prev = (prev_d > 0 and curr_d >= 1.70 * prev_d) or \
+                              (prev_d < 0 and curr_d >= 1.70 * abs(prev_d)) or \
+                              (prev_d == 0 and curr_d > 0)
             cond_surge_avg = curr_d >= (2.0 * avg_d5)
+            cond_delta_force = cond_surge_prev and cond_surge_avg
 
-            c_mtf_monthly = row['RSI_Monthly'] >= row['Prev_RSI_Monthly']
-            c_mtf_weekly = row['RSI_Weekly'] >= row['Prev_RSI_Weekly']
-
-            if not (cond_ce_buy and cond_order_flow and cond_surge_prev and cond_surge_avg and c_mtf_monthly and c_mtf_weekly):
+            # Strictly Price Action & Order Flow Verification
+            if not (cond_chandelier and cond_ce_flag and cond_order_flow and cond_delta_force):
                 continue
 
             deliv_score = float(np.clip((row['DeliveryPct'] / 70.0 * 50.0), 10, 50))
@@ -167,48 +186,54 @@ def run_clean_30d_backfill():
             brs_score = round(deliv_score + close_score, 2)
 
             entry = round(float(row['High']) + 0.05, 2)
-            sl = round(float(row['Low']), 2)
+            # Use Chandelier Exit or Low for Stop Loss
+            ce_stop = round(float(row['CE_Long']), 2) if pd.notna(row['CE_Long']) else round(float(row['Low']), 2)
+            sl = min(round(float(row['Low']), 2), ce_stop)
             risk = max(entry - sl, float(row['Close']) * 0.01)
             target = round(entry + (risk * TARGET_X), 2)
 
             deliv_pct_val = round(float(np.nan_to_num(row['DeliveryPct'], nan=0.0)), 2)
             deliv_qty_val = int(np.nan_to_num(row['DeliveryQty'], nan=0))
             volume_val = int(np.nan_to_num(row['Volume'], nan=0))
-            rsi_daily_val = round(float(np.nan_to_num(row['RSI_Daily'], nan=50.0)), 2)
+            surge_ratio = round(float(curr_d / (avg_d5 + 1e-5)), 2)
 
-            clean_signals.append({
+            # Columns compatible with index.html
+            valid_signals.append({
                 "Date": row['Date_DT'].strftime("%d-%m-%Y"),
                 "Date_DT": row['Date_DT'],
                 "Symbol": symbol,
                 "Timeframe": "D",
                 "Type": "PRE_BREAKOUT",
-                "Pattern": "ORDER_FLOW_SURGE",
+                "Pattern": "PRE_BREAKOUT",
                 "BRS_Score": brs_score,
                 "Entry": entry,
                 "SL": sl,
                 "Target": target,
                 "Close": round(float(row['Close']), 2),
                 "Volume": volume_val,
+                "EMA20": deliv_pct_val,             # Feeds table column cleanly
+                "ADX14": surge_ratio,              # Replaced ADX with Delta Force Surge Ratio
                 "ema": deliv_pct_val,
-                "adx": rsi_daily_val,
+                "adx": surge_ratio,
                 "DeliveryQty": deliv_qty_val,
                 "DeliveryPct": deliv_pct_val,
-                "DelivSpikeRatio": round(float(curr_d / (avg_d5 + 1e-5)), 2),
-                "Daily_RSI": rsi_daily_val
+                "DelivSpikeRatio": surge_ratio,
+                "Daily_RSI": surge_ratio
             })
 
     os.makedirs("data", exist_ok=True)
-    if clean_signals:
-        df_out = pd.DataFrame(clean_signals).sort_values(by=['Date_DT', 'BRS_Score'], ascending=[False, False])
+    if valid_signals:
+        df_out = pd.DataFrame(valid_signals).sort_values(by=['Date_DT', 'BRS_Score'], ascending=[False, False])
         df_out.drop(columns=['Date_DT']).to_csv(SIGNALS_CSV, index=False)
-        print(f"✅ Replaced {SIGNALS_CSV} with clean {LOOKBACK_DAYS}-day signals.")
+        print(f"✅ Exported {len(df_out)} pure Order Flow + CE signals to {SIGNALS_CSV}.")
     else:
         pd.DataFrame(columns=[
             "Date", "Symbol", "Timeframe", "Type", "Pattern", "BRS_Score",
-            "Entry", "SL", "Target", "Close", "Volume", "ema", "adx",
+            "Entry", "SL", "Target", "Close", "Volume", "EMA20", "ADX14", "ema", "adx",
             "DeliveryQty", "DeliveryPct", "DelivSpikeRatio", "Daily_RSI"
         ]).to_csv(SIGNALS_CSV, index=False)
-        print(f"⚠️ No signals found; cleared {SIGNALS_CSV}.")
+        print(f"⚠️ 0 signals found under pure Order Flow & CE rules. Cleared {SIGNALS_CSV}.")
+
 
 if __name__ == "__main__":
-    run_clean_30d_backfill()
+    run_orderflow_ce_scanner()
