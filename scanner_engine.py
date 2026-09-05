@@ -173,7 +173,6 @@ def run_institutional_engine():
     df_raw["Date_DT"] = pd.to_datetime(df_raw["Date"])
     latest_date_str = df_raw['Date_DT'].max().strftime("%d-%m-%Y")
 
-    # Diagnostic Funnel Counters
     stats = {
         "total_fo_symbols": 0,
         "price_and_mcap": 0,
@@ -193,7 +192,7 @@ def run_institutional_engine():
         df = df_sym.copy().sort_values("Date_DT").reset_index(drop=True)
         row = df.iloc[-1]
 
-        # 1. Price & Market Cap Check
+        # Price & Market Cap Check
         if row['Close'] <= MIN_PRICE:
             continue
 
@@ -209,18 +208,13 @@ def run_institutional_engine():
         df['Order_Flow_Delta'] = df['Order_Flow_Delta'].fillna(0.0)
         df['CE_Buy_Flow'] = df['CE_Buy_Flow'].fillna(False).astype(bool)
 
-        # ----------------------------------------------------
-        # ORDER FLOW & DELTA VOLUME METRICS
-        # ----------------------------------------------------
+        # Baseline & Expansion Metrics
         df['Prev_Delta'] = df['Delta_Volume'].shift(1).fillna(0.0)
-        # Shifted 5-period baseline of absolute deltas
         df['Avg_Delta_5'] = (
             df['Delta_Volume'].abs().shift(1).rolling(5, min_periods=3).mean().fillna(0.0)
         )
 
-        # ----------------------------------------------------
-        # MULTI-TIMEFRAME RSI
-        # ----------------------------------------------------
+        # Multi-Timeframe RSI
         df['RSI_Daily'] = compute_rsi(df['Close'], 14)
         df['Prev_RSI_Daily'] = df['RSI_Daily'].shift(1).fillna(df['RSI_Daily'])
 
@@ -240,18 +234,13 @@ def run_institutional_engine():
 
         row = df.iloc[-1]
 
-        # ----------------------------------------------------
-        # SIGNAL CONDITIONS EVALUATION
-        # ----------------------------------------------------
-        # Rule 1 & 2: CE Buying Flow & Positive Order Flow
+        # Conditions
         cond_ce_buy = bool(row['CE_Buy_Flow'])
         cond_order_flow = (row['Order_Flow_Delta'] > 0) and (row['Delta_Volume'] > 0)
         if not (cond_ce_buy and cond_order_flow):
             continue
         stats["ce_and_order_flow"] += 1
 
-        # Rule 3: Delta Volume Surge
-        # >= 70% higher than previous candle AND >= 100% higher than 5-candle avg (2x)
         prev_d = row['Prev_Delta']
         curr_d = row['Delta_Volume']
         avg_d5 = row['Avg_Delta_5']
@@ -266,7 +255,6 @@ def run_institutional_engine():
             continue
         stats["delta_surge_passed"] += 1
 
-        # Multi-Timeframe Alignment Check
         c_mtf_monthly = row['RSI_Monthly'] >= row['Prev_RSI_Monthly']
         c_mtf_weekly = row['RSI_Weekly'] >= row['Prev_RSI_Weekly']
         if not (c_mtf_monthly and c_mtf_weekly):
@@ -275,7 +263,6 @@ def run_institutional_engine():
 
         stats["final_signals"] += 1
 
-        # Scoring & Position Sizing
         deliv_score = float(np.clip((row['DeliveryPct'] / 70.0 * 50.0), 10, 50))
         close_score = float(np.clip(row['Close_Location'] * 50.0, 10, 50))
         composite_brs_score = round(deliv_score + close_score, 2)
@@ -293,7 +280,7 @@ def run_institutional_engine():
             "Symbol": symbol,
             "Timeframe": "D",
             "Type": "PRE_BREAKOUT",
-            "Pattern": "PRE_BREAKOUT",
+            "Pattern": "ORDER_FLOW_SURGE",
             "BRS_Score": composite_brs_score,
             "Entry": entry,
             "SL": sl,
@@ -316,7 +303,11 @@ def run_institutional_engine():
     if os.path.exists(SIGNALS_CSV):
         try:
             existing_df = pd.read_csv(SIGNALS_CSV)
-            existing_df = existing_df[existing_df['Date'] != latest_date_str]
+            # Retain only previous 7 days of historical signals
+            existing_df['Date_DT'] = pd.to_datetime(existing_df['Date'], format="%d-%m-%Y", errors='coerce')
+            cutoff = pd.to_datetime('today') - pd.Timedelta(days=7)
+            existing_df = existing_df[(existing_df['Date_DT'] >= cutoff) & (existing_df['Date'] != latest_date_str)]
+            existing_df = existing_df.drop(columns=['Date_DT'])
             combined_df = pd.concat([today_df, existing_df], ignore_index=True)
         except Exception:
             combined_df = today_df
@@ -326,8 +317,7 @@ def run_institutional_engine():
     if not combined_df.empty:
         combined_df['Date_DT'] = pd.to_datetime(combined_df['Date'], format="%d-%m-%Y")
         combined_df = combined_df.sort_values(by=['Date_DT', 'BRS_Score'], ascending=[False, False])
-        recent_dates = combined_df['Date_DT'].unique()[:30]
-        final_export_df = combined_df[combined_df['Date_DT'].isin(recent_dates)].drop(columns=['Date_DT'])
+        final_export_df = combined_df.drop(columns=['Date_DT'])
     else:
         final_export_df = combined_df
 
@@ -345,14 +335,16 @@ def run_institutional_engine():
 
 def send_telegram_alert(signal: dict):
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
+        print("⚠️ Telegram credentials missing; skipped sending individual alert.")
         return
+
     symbol = signal.get("Symbol")
-    brs = signal.get("BRS_Score")
+    brs = signal.get("BRS_Score", 0.0)
     setup_date = signal.get("Date")
-    entry = signal.get("Entry")
-    sl = signal.get("SL")
-    target = signal.get("Target")
-    close = signal.get("Close")
+    entry = signal.get("Entry", 0.0)
+    sl = signal.get("SL", 0.0)
+    target = signal.get("Target", 0.0)
+    close = signal.get("Close", 0.0)
     deliv_pct = signal.get("DeliveryPct", 0.0)
     rsi_val = signal.get("Daily_RSI", 0.0)
     spike_ratio = signal.get("DelivSpikeRatio", 1.0)
@@ -377,30 +369,57 @@ def send_telegram_alert(signal: dict):
         f"━━━━━━━━━━━━━━━━━━━━\n"
         f"📈 <a href='{chart_url}'>View {symbol} TradingView Chart</a>"
     )
-    requests.post(
-        f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage", 
-        json={"chat_id": TELEGRAM_CHAT_ID, "text": message, "parse_mode": "HTML", "disable_web_page_preview": True}, 
-        timeout=10
-    )
+
+    try:
+        url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+        payload = {
+            "chat_id": TELEGRAM_CHAT_ID,
+            "text": message,
+            "parse_mode": "HTML",
+            "disable_web_page_preview": True
+        }
+        res = requests.post(url, json=payload, timeout=10)
+        if res.status_code != 200:
+            print(f"❌ Telegram API Error ({symbol}): {res.text}")
+        else:
+            print(f"✅ Dispatched Telegram alert for {symbol}")
+    except Exception as e:
+        print(f"❌ Network error dispatching Telegram alert for {symbol}: {e}")
 
 
 def send_summary_telegram(candidates: list, date_str: str):
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
+        print("⚠️ Telegram credentials missing; skipped sending summary.")
         return
+
+    # Add timestamp query param to break Telegram in-app webview cache
+    cache_buster = int(time.time())
+    active_dash_link = f"{DASHBOARD_URL}?v={cache_buster}"
+
     message = (
         f"🏁 <b>DAILY BRAHMASTRA SCAN COMPLETE ({date_str})</b>\n"
         f"━━━━━━━━━━━━━━━━━━━━\n"
         f"📊 <b>High-Conviction F&O Setups Found:</b> {len(candidates)}\n"
         f"🔍 <b>Universe:</b> NSE F&O (EQ Only | MCap ₹51B+ | Price > ₹100)\n\n"
         f"🌐 <b>Interactive Web Dashboard:</b>\n"
-        f"👉 <a href='{DASHBOARD_URL}'>{DASHBOARD_URL}</a>\n"
+        f"👉 <a href='{active_dash_link}'>Open Live Dashboard</a>\n"
         f"━━━━━━━━━━━━━━━━━━━━"
     )
-    requests.post(
-        f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage", 
-        json={"chat_id": TELEGRAM_CHAT_ID, "text": message, "parse_mode": "HTML"}, 
-        timeout=10
-    )
+
+    try:
+        url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+        payload = {
+            "chat_id": TELEGRAM_CHAT_ID,
+            "text": message,
+            "parse_mode": "HTML"
+        }
+        res = requests.post(url, json=payload, timeout=10)
+        if res.status_code != 200:
+            print(f"❌ Telegram Summary API Error: {res.text}")
+        else:
+            print(f"✅ Dispatched Telegram Summary for {date_str}")
+    except Exception as e:
+        print(f"❌ Network error dispatching Telegram summary: {e}")
 
 
 if __name__ == "__main__":
