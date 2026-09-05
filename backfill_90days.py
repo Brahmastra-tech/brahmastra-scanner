@@ -12,7 +12,7 @@ from datetime import datetime, timedelta
 DB_PATH = "data/candles.duckdb"
 SIGNALS_CSV = "data/signals.csv"
 
-# Date Window: 1 August 2026 to present
+# Strict Boundary: 1 August 2026 to present
 START_DATE = datetime(2026, 8, 1)
 END_DATE = datetime(2026, 9, 5)
 
@@ -75,8 +75,8 @@ def get_nifty_fo_symbols() -> set:
 
 
 def auto_ingest_missing_august():
-    """Fetches missing August Bhavcopies into DuckDB without external tools."""
-    print("🔍 Checking and updating candles.duckdb for August 2026 data...")
+    """Directly pulls any missing August 2026 Bhavcopy data into DuckDB."""
+    print("🔍 Ingesting missing August 2026 Bhavcopy data into DuckDB...")
     os.makedirs("data", exist_ok=True)
     conn = duckdb.connect(DB_PATH)
 
@@ -139,7 +139,7 @@ def auto_ingest_missing_august():
                     conn.execute("INSERT INTO ohlcv_candles SELECT * FROM tmp_insert")
                     print(f"📥 Successfully ingested Bhavcopy for {date_iso}")
             except Exception as e:
-                print(f"⚠️ Market holiday or download error on {date_iso}: {e}")
+                print(f"⚠️ Could not pull {date_iso}: {e}")
 
         curr_date += timedelta(days=1)
 
@@ -147,7 +147,6 @@ def auto_ingest_missing_august():
 
 
 def compute_chandelier_exit(df: pd.DataFrame, period: int = 22, mult: float = 3.0):
-    """Calculates True Range, Smoothed ATR, and Chandelier Exit Long Floor."""
     high = df['High']
     low = df['Low']
     close_prev = df['Close'].shift(1)
@@ -224,14 +223,10 @@ def run_august_to_date_backfill():
             if mcap_val > 0.0 and mcap_val < MIN_MARKET_CAP:
                 continue
 
-            # 1. Chandelier Exit condition
             cond_chandelier = (row['Close'] > row['CE_Long']) if pd.notna(row['CE_Long']) else True
             cond_ce_buy = bool(row['CE_Buy_Flow'])
-
-            # 2. Positive Order Flow Delta
             cond_order_flow = (row['Order_Flow_Delta'] > 0) and (row['Delta_Volume'] > 0)
 
-            # 3. Delta Volume Force (Surge)
             prev_d = row['Prev_Delta']
             curr_d = row['Delta_Volume']
             avg_d5 = row['Avg_Delta_5']
@@ -258,7 +253,7 @@ def run_august_to_date_backfill():
             deliv_pct_val = round(float(np.nan_to_num(row['DeliveryPct'], nan=0.0)), 2)
             surge_ratio = round(float(curr_d / (avg_d5 + 1e-5)), 2)
 
-            # Pure price action and order flow data schema
+            # UNIFIED CLEAN SCHEMA
             valid_signals.append({
                 "Date": row['Date_DT'].strftime("%d-%m-%Y"),
                 "Date_DT": row['Date_DT'],
@@ -278,17 +273,19 @@ def run_august_to_date_backfill():
             })
 
     os.makedirs("data", exist_ok=True)
+    clean_columns = [
+        "Date", "Symbol", "Timeframe", "Type", "Pattern", "BRS_Score",
+        "Entry", "SL", "Target", "Close", "Volume",
+        "DeliveryQty", "DeliveryPct", "DelivSpikeRatio"
+    ]
+
     if valid_signals:
         df_out = pd.DataFrame(valid_signals).sort_values(by=['Date_DT', 'BRS_Score'], ascending=[False, False])
-        df_out.drop(columns=['Date_DT']).to_csv(SIGNALS_CSV, index=False)
-        print(f"✅ Generated {len(df_out)} signals from 1 August 2026 to present into {SIGNALS_CSV}!")
+        df_out.drop(columns=['Date_DT'])[clean_columns].to_csv(SIGNALS_CSV, index=False)
+        print(f"✅ Generated {len(df_out)} signals from 1 August 2026 into {SIGNALS_CSV}!")
     else:
-        pd.DataFrame(columns=[
-            "Date", "Symbol", "Timeframe", "Type", "Pattern", "BRS_Score",
-            "Entry", "SL", "Target", "Close", "Volume",
-            "DeliveryQty", "DeliveryPct", "DelivSpikeRatio"
-        ]).to_csv(SIGNALS_CSV, index=False)
-        print(f"⚠️ No signals passed between 1 August 2026 and present.")
+        pd.DataFrame(columns=clean_columns).to_csv(SIGNALS_CSV, index=False)
+        print("⚠️ No signals passed between 1 August 2026 and present.")
 
 
 if __name__ == "__main__":
