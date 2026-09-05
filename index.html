@@ -141,7 +141,7 @@
             border-collapse: collapse;
             text-align: left;
             font-size: 0.85rem;
-            min-width: 800px;
+            min-width: 850px;
         }
 
         th {
@@ -220,10 +220,10 @@
 
     <div class="header">
         <div class="logo">
-            <span style="font-size: 1.5rem;">🚀</span>
+            <span style="font-size: 1.5rem;">🏛️</span>
             <div>
                 <h1>BRAHMASTRA SCANNER</h1>
-                <p>NSE F&O Pre-Breakout Watchlist & Signal Terminal</p>
+                <p>NSE F&O Chandelier Exit & Order Flow Terminal</p>
             </div>
         </div>
         <div class="header-actions">
@@ -233,7 +233,7 @@
     </div>
 
     <div class="controls">
-        <input type="text" id="searchInput" class="search-box" placeholder="Search Symbol (e.g. RELIANCE, TITAN)...">
+        <input type="text" id="searchInput" class="search-box" placeholder="Search Symbol (e.g. RELIANCE, SBILIFE)...">
         
         <div class="date-picker-wrapper">
             <span>Date:</span>
@@ -243,7 +243,7 @@
         <select id="patternFilter" class="filter-select">
             <option value="ALL">All Patterns</option>
             <option value="PRE_BREAKOUT">PRE_BREAKOUT</option>
-            <option value="PRE_BREAKDOWN">PRE_BREAKDOWN</option>
+            <option value="ORDER_FLOW_SURGE">ORDER_FLOW_SURGE</option>
         </select>
     </div>
 
@@ -257,8 +257,8 @@
                     <th>Trigger Entry</th>
                     <th>Stop Loss</th>
                     <th>Target (3x)</th>
-                    <th>20 EMA</th>
-                    <th>14 ADX</th>
+                    <th>Delivery %</th>
+                    <th>Delta Surge</th>
                     <th>Chart</th>
                 </tr>
             </thead>
@@ -275,7 +275,8 @@
         let allData = [];
         let filteredData = [];
 
-        fetch('data/signals.csv')
+        // Fetch signals.csv with query param to bypass Telegram / Webview cache
+        fetch('data/signals.csv?t=' + Date.now())
             .then(response => {
                 if (!response.ok) {
                     throw new Error('CSV file not found');
@@ -287,7 +288,7 @@
                     header: true,
                     skipEmptyLines: true,
                     complete: function(results) {
-                        allData = results.data;
+                        allData = results.data.filter(r => (r.symbol || r.Symbol));
                         filteredData = allData;
                         document.getElementById('signalCount').innerText = `${allData.length} Total Signals`;
                         renderTable(allData);
@@ -318,16 +319,19 @@
             }
 
             data.forEach(row => {
-                const date = row.date || row.Date || 'N/A';
-                const symbol = row.symbol || row.Symbol || 'N/A';
-                const pattern = row.pattern || row.type || row.Type || row.Pattern || 'PRE_BREAKOUT';
-                const entry = parseFloat(row.entry || row.Entry || 0).toFixed(2);
-                const sl = parseFloat(row.sl || row.SL || 0).toFixed(2);
-                const target = parseFloat(row.target || row.Target || 0).toFixed(2);
-                const ema = parseFloat(row.ema || row.EMA || 0).toFixed(2);
-                const adx = parseFloat(row.adx || row.ADX || 0).toFixed(2);
+                const date = row.Date || row.date || 'N/A';
+                const symbol = row.Symbol || row.symbol || 'N/A';
+                const pattern = row.Pattern || row.pattern || row.Type || row.type || 'PRE_BREAKOUT';
+                
+                const entry = parseFloat(row.Entry || row.entry || 0).toFixed(2);
+                const sl = parseFloat(row.SL || row.sl || 0).toFixed(2);
+                const target = parseFloat(row.Target || row.target || 0).toFixed(2);
+                
+                // Fallbacks for Delivery % and Delta Volume Surge
+                const delivPct = parseFloat(row.DeliveryPct || row.EMA20 || row.ema || 0).toFixed(1);
+                const deltaSurge = parseFloat(row.DelivSpikeRatio || row.ADX14 || row.adx || 1.0).toFixed(2);
 
-                const badgeClass = pattern.includes('BREAKOUT') ? 'badge-breakout' : 'badge-breakdown';
+                const badgeClass = pattern.includes('BREAKDOWN') ? 'badge-breakdown' : 'badge-breakout';
                 const tvUrl = `https://in.tradingview.com/chart/?symbol=NSE:${symbol}`;
 
                 const tr = document.createElement('tr');
@@ -338,8 +342,8 @@
                     <td>₹${entry}</td>
                     <td>₹${sl}</td>
                     <td>₹${target}</td>
-                    <td>₹${ema}</td>
-                    <td>${adx}</td>
+                    <td>${delivPct}%</td>
+                    <td>${deltaSurge}x</td>
                     <td><a href="${tvUrl}" target="_blank" class="btn-chart">Chart ↗</a></td>
                 `;
                 tbody.appendChild(tr);
@@ -351,28 +355,32 @@
         document.getElementById('patternFilter').addEventListener('change', filterData);
 
         function filterData() {
-            const searchVal = document.getElementById('searchInput').value.toUpperCase();
+            const searchVal = document.getElementById('searchInput').value.trim().toUpperCase();
             const patternVal = document.getElementById('patternFilter').value;
             const dateVal = document.getElementById('dateFilter').value;
 
+            // Formats HTML date picker (YYYY-MM-DD) to CSV date format (DD-MM-YYYY)
             let formattedSearchDate = '';
             if (dateVal) {
                 const parts = dateVal.split('-');
-                formattedSearchDate = `${parts[2]}-${parts[1]}-${parts[0]}`;
+                if (parts.length === 3) {
+                    formattedSearchDate = `${parts[2]}-${parts[1]}-${parts[0]}`;
+                }
             }
 
             filteredData = allData.filter(row => {
-                const symbol = (row.symbol || row.Symbol || '').toUpperCase();
-                const pattern = (row.pattern || row.type || row.Type || '').toUpperCase();
-                const rowDate = (row.date || row.Date || '');
+                const symbol = (row.Symbol || row.symbol || '').toUpperCase();
+                const pattern = (row.Pattern || row.pattern || row.Type || row.type || '').toUpperCase();
+                const rowDate = (row.Date || row.date || '').trim();
 
                 const matchesSearch = symbol.includes(searchVal);
-                const matchesPattern = patternVal === 'ALL' || pattern.includes(patternVal);
+                const matchesPattern = patternVal === 'ALL' || pattern === patternVal || pattern.includes(patternVal);
                 const matchesDate = !formattedSearchDate || rowDate === formattedSearchDate;
 
                 return matchesSearch && matchesPattern && matchesDate;
             });
 
+            document.getElementById('signalCount').innerText = `${filteredData.length} Filtered Signals`;
             renderTable(filteredData);
         }
 
