@@ -4,6 +4,9 @@ import pandas as pd
 import numpy as np
 import requests
 
+# ==========================================
+# CONFIGURATION
+# ==========================================
 DB_PATH = "data/candles.duckdb"
 SIGNALS_CSV = "data/signals.csv"
 LOOKBACK_DAYS = 30
@@ -71,7 +74,7 @@ def compute_rsi(series: pd.Series, period: int = 14) -> pd.Series:
     return rsi.fillna(50.0)
 
 def run_clean_30d_backfill():
-    print("⏳ Running Clean 30-Day History Generation...")
+    print(f"⏳ Running Clean {LOOKBACK_DAYS}-Day History Generation...")
 
     if not os.path.exists(DB_PATH):
         print(f"❌ Database not found at {DB_PATH}.")
@@ -197,17 +200,15 @@ def run_clean_30d_backfill():
     os.makedirs("data", exist_ok=True)
     if clean_signals:
         df_out = pd.DataFrame(clean_signals).sort_values(by=['Date_DT', 'BRS_Score'], ascending=[False, False])
-        # OVERWRITE file completely (wiping previous bad data)
         df_out.drop(columns=['Date_DT']).to_csv(SIGNALS_CSV, index=False)
-        print(f"✅ Replaced {SIGNALS_CSV} with clean 7-day signals.")
+        print(f"✅ Replaced {SIGNALS_CSV} with clean {LOOKBACK_DAYS}-day signals.")
     else:
-        # Create empty template if no stocks passed
         pd.DataFrame(columns=[
             "Date", "Symbol", "Timeframe", "Type", "Pattern", "BRS_Score",
             "Entry", "SL", "Target", "Close", "Volume", "ema", "adx",
             "DeliveryQty", "DeliveryPct", "DelivSpikeRatio", "Daily_RSI"
         ]).to_csv(SIGNALS_CSV, index=False)
-        print("⚠️ No signals found; cleared signals.csv.")
+        print(f"⚠️ No signals found; cleared {SIGNALS_CSV}.")
 
 if __name__ == "__main__":
-    run_clean_7d_backfill()
+    run_clean_30d_backfill()
