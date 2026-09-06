@@ -6,13 +6,13 @@ import numpy as np
 import requests
 
 # ==========================================
-# CONFIGURATION & ENVIRONMENT
+# CONFIGURATION & CANONICAL F&O UNIVERSE
 # ==========================================
 DB_PATH = "data/candles.duckdb"
 SIGNALS_CSV = "data/signals.csv"
 TARGET_X = 3.0
 
-MIN_MARKET_CAP = 51_000_000_000.0  # ₹51 Billion (₹5,100 Crore)
+MIN_MARKET_CAP = 51_000_000_000.0  # ₹51B
 MIN_PRICE = 100.0
 
 # Chandelier Exit Parameters
@@ -23,9 +23,8 @@ TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN") or os.getenv("TELEGRAM_TOKE
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID") or os.getenv("CHAT_ID")
 DASHBOARD_URL = "https://brahmastra-tech.github.io/brahmastra-scanner/"
 
-NSE_FO_URL = "https://archives.nseindia.com/content/fo/fo_mktlots.csv"
-
-FALLBACK_FO_SYMBOLS = {
+# Static, definitive NSE F&O Universe (No dynamic cloud HTTP requests)
+NSE_FO_SYMBOLS = frozenset({
     "AARTIIND", "ABB", "ABBOTINDIA", "ABCAPITAL", "ABFRL", "ACC", "ADANIENT",
     "ADANIPORTS", "ALKEM", "AMBUJACEM", "APOLLOHOSP", "APOLLOTYRE", "ASHOKLEY",
     "ASIANPAINT", "ASTRAL", "ATUL", "AUBANK", "AUROPHARMA", "AXISBANK", "BAJAJ-AUTO",
@@ -52,32 +51,7 @@ FALLBACK_FO_SYMBOLS = {
     "TATACOMM", "TATACONSUM", "TATAMOTORS", "TATAPOWER", "TATASTEEL", "TCS", "TECHM",
     "TITAN", "TORNTPHARM", "TRENT", "TVSMOTOR", "UBL", "ULTRACEMCO", "UPL", "VEDL",
     "VOLTAS", "WIPRO", "ZEEL"
-}
-
-
-def get_nifty_fo_symbols() -> set:
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
-    }
-    try:
-        resp = requests.get(NSE_FO_URL, headers=headers, timeout=4)
-        if resp.status_code == 200:
-            lines = [line.strip() for line in resp.text.split("\n") if line.strip()]
-            symbols = set()
-            for line in lines[1:]:
-                parts = [p.strip() for p in line.split(",")]
-                if len(parts) >= 2:
-                    sym = parts[1].upper().replace("-EQ", "").strip()
-                    if sym and not any(idx in sym for idx in ["NIFTY", "INDIAVIX", "BANK"]):
-                        symbols.add(sym)
-            if len(symbols) >= 50:
-                print(f"✅ Dynamically loaded {len(symbols)} F&O symbols from NSE.")
-                return symbols
-    except Exception:
-        pass
-
-    print(f"ℹ️ Cloud runner using robust fallback universe ({len(FALLBACK_FO_SYMBOLS)} symbols).")
-    return FALLBACK_FO_SYMBOLS
+})
 
 
 def compute_chandelier_exit(df: pd.DataFrame, period: int = 22, mult: float = 3.0):
@@ -90,20 +64,18 @@ def compute_chandelier_exit(df: pd.DataFrame, period: int = 22, mult: float = 3.
     tr3 = (low - close_prev).abs()
     tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
 
-    atr = tr.ewm(alpha=1/period, min_periods=period, adjust=False).mean()
+    atr = tr.ewm(alpha=1 / period, min_periods=period, adjust=False).mean()
     highest_high = high.rolling(window=period, min_periods=period).max()
     ce_long = highest_high - (mult * atr)
     return ce_long, atr
 
 
 def run_institutional_engine():
-    print("🚀 Running Brahmastra Scanner Engine (Chandelier Exit + Order Flow + Delta Surge)...")
+    print("🚀 Running Brahmastra Scanner Engine (Strict F&O Universe Only)...")
 
     if not os.path.exists(DB_PATH):
         print(f"❌ Database not found at {DB_PATH}.")
         return
-
-    fo_symbols = get_nifty_fo_symbols()
 
     conn = duckdb.connect(DB_PATH)
     cols_info = conn.execute("DESCRIBE ohlcv_candles").fetchall()
@@ -134,26 +106,34 @@ def run_institutional_engine():
     conn.close()
 
     if df_raw.empty:
-        print("⚠️ No EQ records found in database meeting the initial price filter.")
+        print("⚠️ No EQ records found in database meeting initial price criteria.")
         return
 
-    # Clean symbol formatting to prevent mismatch
-    df_raw["Symbol_Clean"] = df_raw["Symbol"].astype(str).str.upper().str.strip()
-    df_raw["Symbol_Clean"] = df_raw["Symbol_Clean"].str.replace("-EQ", "", regex=False)
+    # Normalize Symbol Names (strip whitespace, suffixes, series notation)
+    df_raw["Symbol_Clean"] = (
+        df_raw["Symbol"]
+        .astype(str)
+        .str.upper()
+        .str.strip()
+        .str.replace(r"-EQ$", "", regex=True)
+        .str.replace(r"\.EQ$", "", regex=True)
+    )
 
-    matched_df = df_raw[df_raw["Symbol_Clean"].isin(fo_symbols)].copy()
-    if matched_df.empty:
-        print("⚠️ Strict F&O filter found 0 matches; evaluating all EQ database symbols.")
-        matched_df = df_raw.copy()
+    # STRICT INNER JOIN - Discards anything outside the NSE F&O universe
+    df_raw = df_raw[df_raw["Symbol_Clean"].isin(NSE_FO_SYMBOLS)].copy()
 
-    df_raw = matched_df
+    if df_raw.empty:
+        print("⚠️ No stocks matched the NSE F&O universe. Check symbol formatting in candles.duckdb.")
+        return
+
+    print(f"📊 Filtered dataset to {df_raw['Symbol_Clean'].nunique()} valid F&O stocks.")
 
     df_raw["Date_DT"] = pd.to_datetime(df_raw["Date"])
     latest_date_str = df_raw['Date_DT'].max().strftime("%d-%m-%Y")
 
     all_scored_signals = []
 
-    for symbol, df_sym in df_raw.groupby('Symbol'):
+    for symbol, df_sym in df_raw.groupby('Symbol_Clean'):
         if len(df_sym) < 15:
             continue
 
@@ -235,7 +215,11 @@ def run_institutional_engine():
         })
 
     os.makedirs("data", exist_ok=True)
-    today_df = pd.DataFrame(all_scored_signals).sort_values("BRS_Score", ascending=False) if all_scored_signals else pd.DataFrame()
+    today_df = (
+        pd.DataFrame(all_scored_signals).sort_values("BRS_Score", ascending=False)
+        if all_scored_signals
+        else pd.DataFrame()
+    )
 
     clean_columns = [
         "Date", "Symbol", "Timeframe", "Type", "Pattern", "BRS_Score",
@@ -246,7 +230,7 @@ def run_institutional_engine():
     if os.path.exists(SIGNALS_CSV):
         try:
             existing_df = pd.read_csv(SIGNALS_CSV)
-            # Remove any duplicate records for the latest date and keep historical ones
+            # Remove existing rows for today, preserve history
             existing_df = existing_df[existing_df['Date'] != latest_date_str]
             combined_df = pd.concat([today_df, existing_df], ignore_index=True)
         except Exception:
@@ -257,6 +241,9 @@ def run_institutional_engine():
     if not combined_df.empty:
         available_cols = [c for c in clean_columns if c in combined_df.columns]
         combined_df = combined_df[available_cols]
+        # Strict enforcement: filter the existing file as well to remove any non-F&O residual rows
+        combined_df["Symbol_Clean"] = combined_df["Symbol"].astype(str).str.upper().str.strip()
+        combined_df = combined_df[combined_df["Symbol_Clean"].isin(NSE_FO_SYMBOLS)].drop(columns=["Symbol_Clean"])
         combined_df['Date_DT'] = pd.to_datetime(combined_df['Date'], format="%d-%m-%Y", errors='coerce')
         combined_df = combined_df.sort_values(by=['Date_DT', 'BRS_Score'], ascending=[False, False])
         final_export_df = combined_df.drop(columns=['Date_DT'])
@@ -264,7 +251,7 @@ def run_institutional_engine():
         final_export_df = pd.DataFrame(columns=clean_columns)
 
     final_export_df.to_csv(SIGNALS_CSV, index=False)
-    print(f"✅ Processed {len(today_df)} signals for latest date {latest_date_str}.")
+    print(f"✅ Extracted {len(today_df)} valid F&O signals for {latest_date_str}.")
 
     top_candidates = today_df.to_dict('records') if not today_df.empty else []
     try:
