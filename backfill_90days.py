@@ -53,20 +53,10 @@ def auto_ingest_missing_august():
     print("🔍 Checking and updating DuckDB for August sessions...")
     os.makedirs("data", exist_ok=True)
     conn = duckdb.connect(DB_PATH)
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS ohlcv_candles (
-            symbol VARCHAR,
-            timestamp TIMESTAMP,
-            open DOUBLE,
-            high DOUBLE,
-            low DOUBLE,
-            close DOUBLE,
-            volume BIGINT,
-            series VARCHAR,
-            delivery_qty BIGINT,
-            delivery_pct DOUBLE
-        )
-    """)
+    
+    # Check existing schema safely
+    cols_info = [c[0].lower() for c in conn.execute("DESCRIBE ohlcv_candles").fetchall()]
+    has_series = "series" in cols_info
 
     curr_date = START_DATE
     headers = {"User-Agent": "Mozilla/5.0"}
@@ -90,15 +80,20 @@ def auto_ingest_missing_august():
                         eq_df['low'] = pd.to_numeric(eq_df['LOW_PRICE'], errors='coerce')
                         eq_df['close'] = pd.to_numeric(eq_df['CLOSE_PRICE'], errors='coerce')
                         eq_df['volume'] = pd.to_numeric(eq_df['TTL_TRD_QNTY'], errors='coerce').fillna(0).astype('int64')
-                        eq_df['series'] = 'EQ'
                         eq_df['delivery_qty'] = pd.to_numeric(eq_df['DELIV_QTY'], errors='coerce').fillna(0).astype('int64')
                         eq_df['delivery_pct'] = pd.to_numeric(eq_df['DELIV_PER'], errors='coerce').fillna(0.0)
 
-                        insert_df = eq_df[['symbol', 'timestamp', 'open', 'high', 'low', 'close', 'volume', 'series', 'delivery_qty', 'delivery_pct']].dropna(subset=['symbol', 'close'])
+                        if has_series:
+                            eq_df['series'] = 'EQ'
+                            cols = ['symbol', 'timestamp', 'open', 'high', 'low', 'close', 'volume', 'series', 'delivery_qty', 'delivery_pct']
+                        else:
+                            cols = ['symbol', 'timestamp', 'open', 'high', 'low', 'close', 'volume', 'delivery_qty', 'delivery_pct']
+
+                        insert_df = eq_df[cols].dropna(subset=['symbol', 'close'])
                         conn.register("tmp_insert", insert_df)
                         conn.execute("INSERT INTO ohlcv_candles SELECT * FROM tmp_insert")
                         print(f"📥 Bhavcopy ingested: {date_iso}")
-                except Exception as e:
+                except Exception:
                     pass
         curr_date += timedelta(days=1)
     conn.close()
@@ -130,7 +125,13 @@ def run_august_to_date_backfill():
     select_parts.append("order_flow_delta AS Order_Flow_Delta" if "order_flow_delta" in cols_info else "CASE WHEN close >= open THEN 1.0 ELSE -1.0 END AS Order_Flow_Delta")
     select_parts.append("ce_buy_flow AS CE_Buy_Flow" if "ce_buy_flow" in cols_info else "TRUE AS CE_Buy_Flow")
 
-    df_raw = conn.execute(f"SELECT {', '.join(select_parts)} FROM ohlcv_candles WHERE UPPER(series) = 'EQ' AND close > {MIN_PRICE} ORDER BY symbol, timestamp ASC").df()
+    # Safe WHERE clause (never assume 'series' column exists in table)
+    where_conditions = [f"close > {MIN_PRICE}"]
+    if "series" in cols_info:
+        where_conditions.append("UPPER(series) = 'EQ'")
+
+    query = f"SELECT {', '.join(select_parts)} FROM ohlcv_candles WHERE {' AND '.join(where_conditions)} ORDER BY symbol, timestamp ASC"
+    df_raw = conn.execute(query).df()
     conn.close()
 
     if df_raw.empty:
@@ -206,7 +207,9 @@ def run_august_to_date_backfill():
     if valid_signals:
         df_out = pd.DataFrame(valid_signals).sort_values(by=['Date_DT', 'BRS_Score'], ascending=[False, False])
         df_out.drop(columns=['Date_DT'])[clean_columns].to_csv(SIGNALS_CSV, index=False)
-        print(f"✅ Generated {len(df_out)} historical F&O signals in {SIGNALS_CSV}!")
+        print(f"✅ Generated {len(df_out)} historical F&O signals into {SIGNALS_CSV}!")
+    else:
+        pd.DataFrame(columns=clean_columns).to_csv(SIGNALS_CSV, index=False)
 
 
 if __name__ == "__main__":
