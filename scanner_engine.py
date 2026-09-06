@@ -6,13 +6,13 @@ import numpy as np
 import requests
 
 # ==========================================
-# CONFIGURATION & CANONICAL F&O UNIVERSE
+# CONFIGURATION & STRICT F&O UNIVERSE
 # ==========================================
 DB_PATH = "data/candles.duckdb"
 SIGNALS_CSV = "data/signals.csv"
 TARGET_X = 3.0
 
-MIN_MARKET_CAP = 51_000_000_000.0  # ₹51B
+MIN_MARKET_CAP = 51_000_000_000.0  # ₹51 Billion
 MIN_PRICE = 100.0
 
 # Chandelier Exit Parameters
@@ -23,7 +23,6 @@ TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN") or os.getenv("TELEGRAM_TOKE
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID") or os.getenv("CHAT_ID")
 DASHBOARD_URL = "https://brahmastra-tech.github.io/brahmastra-scanner/"
 
-# Static, definitive NSE F&O Universe (No dynamic cloud HTTP requests)
 NSE_FO_SYMBOLS = frozenset({
     "AARTIIND", "ABB", "ABBOTINDIA", "ABCAPITAL", "ABFRL", "ACC", "ADANIENT",
     "ADANIPORTS", "ALKEM", "AMBUJACEM", "APOLLOHOSP", "APOLLOTYRE", "ASHOKLEY",
@@ -71,7 +70,7 @@ def compute_chandelier_exit(df: pd.DataFrame, period: int = 22, mult: float = 3.
 
 
 def run_institutional_engine():
-    print("🚀 Running Brahmastra Scanner Engine (Strict F&O Universe Only)...")
+    print("🚀 Running Brahmastra Scanner Engine (Strict F&O Filter)...")
 
     if not os.path.exists(DB_PATH):
         print(f"❌ Database not found at {DB_PATH}.")
@@ -109,7 +108,7 @@ def run_institutional_engine():
         print("⚠️ No EQ records found in database meeting initial price criteria.")
         return
 
-    # Normalize Symbol Names (strip whitespace, suffixes, series notation)
+    # Clean symbol formatting
     df_raw["Symbol_Clean"] = (
         df_raw["Symbol"]
         .astype(str)
@@ -119,14 +118,12 @@ def run_institutional_engine():
         .str.replace(r"\.EQ$", "", regex=True)
     )
 
-    # STRICT INNER JOIN - Discards anything outside the NSE F&O universe
+    # Strictly filter for F&O universe
     df_raw = df_raw[df_raw["Symbol_Clean"].isin(NSE_FO_SYMBOLS)].copy()
 
     if df_raw.empty:
-        print("⚠️ No stocks matched the NSE F&O universe. Check symbol formatting in candles.duckdb.")
+        print("⚠️ No matching F&O stocks found in candles database.")
         return
-
-    print(f"📊 Filtered dataset to {df_raw['Symbol_Clean'].nunique()} valid F&O stocks.")
 
     df_raw["Date_DT"] = pd.to_datetime(df_raw["Date"])
     latest_date_str = df_raw['Date_DT'].max().strftime("%d-%m-%Y")
@@ -227,31 +224,36 @@ def run_institutional_engine():
         "DeliveryQty", "DeliveryPct", "DelivSpikeRatio"
     ]
 
+    # Non-destructive merge preserving all 30-day historical signals
     if os.path.exists(SIGNALS_CSV):
         try:
             existing_df = pd.read_csv(SIGNALS_CSV)
-            # Remove existing rows for today, preserve history
-            existing_df = existing_df[existing_df['Date'] != latest_date_str]
-            combined_df = pd.concat([today_df, existing_df], ignore_index=True)
+            if not existing_df.empty and 'Date' in existing_df.columns:
+                existing_df = existing_df[existing_df['Date'] != latest_date_str]
+                combined_df = pd.concat([today_df, existing_df], ignore_index=True)
+            else:
+                combined_df = today_df
         except Exception:
             combined_df = today_df
     else:
         combined_df = today_df
 
     if not combined_df.empty:
-        available_cols = [c for c in clean_columns if c in combined_df.columns]
-        combined_df = combined_df[available_cols]
-        # Strict enforcement: filter the existing file as well to remove any non-F&O residual rows
         combined_df["Symbol_Clean"] = combined_df["Symbol"].astype(str).str.upper().str.strip()
         combined_df = combined_df[combined_df["Symbol_Clean"].isin(NSE_FO_SYMBOLS)].drop(columns=["Symbol_Clean"])
+        
+        for col in clean_columns:
+            if col not in combined_df.columns:
+                combined_df[col] = 0.0
+
+        combined_df = combined_df[clean_columns]
         combined_df['Date_DT'] = pd.to_datetime(combined_df['Date'], format="%d-%m-%Y", errors='coerce')
-        combined_df = combined_df.sort_values(by=['Date_DT', 'BRS_Score'], ascending=[False, False])
-        final_export_df = combined_df.drop(columns=['Date_DT'])
+        final_export_df = combined_df.sort_values(by=['Date_DT', 'BRS_Score'], ascending=[False, False]).drop(columns=['Date_DT'])
     else:
         final_export_df = pd.DataFrame(columns=clean_columns)
 
     final_export_df.to_csv(SIGNALS_CSV, index=False)
-    print(f"✅ Extracted {len(today_df)} valid F&O signals for {latest_date_str}.")
+    print(f"✅ Total signals preserved in CSV: {len(final_export_df)} (Today's signals: {len(today_df)})")
 
     top_candidates = today_df.to_dict('records') if not today_df.empty else []
     try:
