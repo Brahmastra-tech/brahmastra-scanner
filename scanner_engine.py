@@ -25,55 +25,59 @@ DASHBOARD_URL = "https://brahmastra-tech.github.io/brahmastra-scanner/"
 
 NSE_FO_URL = "https://archives.nseindia.com/content/fo/fo_mktlots.csv"
 
+FALLBACK_FO_SYMBOLS = {
+    "AARTIIND", "ABB", "ABBOTINDIA", "ABCAPITAL", "ABFRL", "ACC", "ADANIENT",
+    "ADANIPORTS", "ALKEM", "AMBUJACEM", "APOLLOHOSP", "APOLLOTYRE", "ASHOKLEY",
+    "ASIANPAINT", "ASTRAL", "ATUL", "AUBANK", "AUROPHARMA", "AXISBANK", "BAJAJ-AUTO",
+    "BAJAJFINSV", "BAJFINANCE", "BALKRISIND", "BALRAMCHIN", "BANDHANBNK", "BANKBARODA",
+    "BATAINDIA", "BEL", "BERGEPAINT", "BHARATFORG", "BHARTIARTL", "BHEL", "BIOCON",
+    "BOSCHLTD", "BPCL", "BRITANNIA", "BSOFT", "CANBK", "CANFINHOME", "CHAMBLFERT",
+    "CHOLAFIN", "CIPLA", "COALINDIA", "COFORGE", "COLPAL", "CONCOR", "COROMANDEL",
+    "CROMPTON", "CUB", "CUMMINSIND", "DABUR", "DALBHARAT", "DEEPAKNTR", "DIVISLAB",
+    "DIXON", "DLF", "DRREDDY", "EICHERMOT", "ESCORTS", "EXIDEIND", "FEDERALBNK",
+    "GAIL", "GLENMARK", "GMRINFRA", "GNFC", "GODREJCP", "GODREJPROP", "GRANULES",
+    "GRASIM", "GUJGASLTD", "HAL", "HAVELLS", "HCLTECH", "HDFCAMC", "HDFCBANK",
+    "HDFCLIFE", "HEROMOTOCO", "HINDALCO", "HINDPETRO", "HINDUNILVR", "ICICIBANK",
+    "ICICIGI", "ICICIPRULI", "IDEA", "IDFC", "IDFCFIRSTB", "IEX", "IGL", "INDHOTEL",
+    "INDIACEM", "INDIAMART", "INDIGO", "INDUSINDBK", "INDUSTOWER", "INFY", "IOC",
+    "IPCALAB", "IRCTC", "ITC", "JINDALSTEL", "JKCEMENT", "JSWSTEEL", "JUBLFOOD",
+    "KOTAKBANK", "LALPATHLAB", "LAURUSLABS", "LICHSGFIN", "LT", "LTIM", "LTTS",
+    "LUPIN", "M&M", "M&MFIN", "MANAPPURAM", "MARICO", "MARUTI", "MCDOWELL-N",
+    "MCX", "METROPOLIS", "MFSL", "MGL", "MOTHERSON", "MPHASIS", "MRF", "MUTHOOTFIN",
+    "NATIONALUM", "NAUKRI", "NAVINFLUOR", "NESTLEIND", "NMDC", "NTPC", "OBEROIRLTY",
+    "OFSS", "ONGC", "PAGEIND", "PEL", "PERSISTENT", "PETRONET", "PFC", "PIDILITIND",
+    "PIIND", "PNB", "POLYCAB", "POONAWALLA", "POWERGRID", "PVRINOX", "RAMCOCEM",
+    "RBLBANK", "RECLTD", "RELIANCE", "SAIL", "SBICARD", "SBILIFE", "SBIN", "SHREECEM",
+    "SHRIRAMFIN", "SIEMENS", "SRF", "SUNPHARMA", "SUNTV", "SYNGENE", "TATACHEM",
+    "TATACOMM", "TATACONSUM", "TATAMOTORS", "TATAPOWER", "TATASTEEL", "TCS", "TECHM",
+    "TITAN", "TORNTPHARM", "TRENT", "TVSMOTOR", "UBL", "ULTRACEMCO", "UPL", "VEDL",
+    "VOLTAS", "WIPRO", "ZEEL"
+}
+
 
 def get_nifty_fo_symbols() -> set:
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
     }
     try:
-        resp = requests.get(NSE_FO_URL, headers=headers, timeout=5)
+        resp = requests.get(NSE_FO_URL, headers=headers, timeout=4)
         if resp.status_code == 200:
             lines = [line.strip() for line in resp.text.split("\n") if line.strip()]
             symbols = set()
             for line in lines[1:]:
                 parts = [p.strip() for p in line.split(",")]
                 if len(parts) >= 2:
-                    sym = parts[1].upper()
-                    if sym and not any(idx in sym for idx in ["NIFTY", "INDIAVIX"]):
+                    sym = parts[1].upper().replace("-EQ", "").strip()
+                    if sym and not any(idx in sym for idx in ["NIFTY", "INDIAVIX", "BANK"]):
                         symbols.add(sym)
-            if symbols:
+            if len(symbols) >= 50:
+                print(f"✅ Dynamically loaded {len(symbols)} F&O symbols from NSE.")
                 return symbols
     except Exception:
         pass
 
-    return {
-        "AARTIIND", "ABB", "ABBOTINDIA", "ABCAPITAL", "ABFRL", "ACC", "ADANIENT",
-        "ADANIPORTS", "ALKEM", "AMBUJACEM", "APOLLOHOSP", "APOLLOTYRE", "ASHOKLEY",
-        "ASIANPAINT", "ASTRAL", "ATUL", "AUBANK", "AUROPHARMA", "AXISBANK", "BAJAJ-AUTO",
-        "BAJAJFINSV", "BAJFINANCE", "BALKRISIND", "BALRAMCHIN", "BANDHANBNK", "BANKBARODA",
-        "BATAINDIA", "BEL", "BERGEPAINT", "BHARATFORG", "BHARTIARTL", "BHEL", "BIOCON",
-        "BOSCHLTD", "BPCL", "BRITANNIA", "BSOFT", "CANBK", "CANFINHOME", "CHAMBLFERT",
-        "CHOLAFIN", "CIPLA", "COALINDIA", "COFORGE", "COLPAL", "CONCOR", "COROMANDEL",
-        "CROMPTON", "CUB", "CUMMINSIND", "DABUR", "DALBHARAT", "DEEPAKNTR", "DIVISLAB",
-        "DIXON", "DLF", "DRREDDY", "EICHERMOT", "ESCORTS", "EXIDEIND", "FEDERALBNK",
-        "GAIL", "GLENMARK", "GMRINFRA", "GNFC", "GODREJCP", "GODREJPROP", "GRANULES",
-        "GRASIM", "GUJGASLTD", "HAL", "HAVELLS", "HCLTECH", "HDFCAMC", "HDFCBANK",
-        "HDFCLIFE", "HEROMOTOCO", "HINDALCO", "HINDPETRO", "HINDUNILVR", "ICICIBANK",
-        "ICICIGI", "ICICIPRULI", "IDEA", "IDFC", "IDFCFIRSTB", "IEX", "IGL", "INDHOTEL",
-        "INDIACEM", "INDIAMART", "INDIGO", "INDUSINDBK", "INDUSTOWER", "INFY", "IOC",
-        "IPCALAB", "IRCTC", "ITC", "JINDALSTEL", "JKCEMENT", "JSWSTEEL", "JUBLFOOD",
-        "KOTAKBANK", "LALPATHLAB", "LAURUSLABS", "LICHSGFIN", "LT", "LTIM", "LTTS",
-        "LUPIN", "M&M", "M&MFIN", "MANAPPURAM", "MARICO", "MARUTI", "MCDOWELL-N",
-        "MCX", "METROPOLIS", "MFSL", "MGL", "MOTHERSON", "MPHASIS", "MRF", "MUTHOOTFIN",
-        "NATIONALUM", "NAUKRI", "NAVINFLUOR", "NESTLEIND", "NMDC", "NTPC", "OBEROIRLTY",
-        "OFSS", "ONGC", "PAGEIND", "PEL", "PERSISTENT", "PETRONET", "PFC", "PIDILITIND",
-        "PIIND", "PNB", "POLYCAB", "POONAWALLA", "POWERGRID", "PVRINOX", "RAMCOCEM",
-        "RBLBANK", "RECLTD", "RELIANCE", "SAIL", "SBICARD", "SBILIFE", "SBIN", "SHREECEM",
-        "SHRIRAMFIN", "SIEMENS", "SRF", "SUNPHARMA", "SUNTV", "SYNGENE", "TATACHEM",
-        "TATACOMM", "TATACONSUM", "TATAMOTORS", "TATAPOWER", "TATASTEEL", "TCS", "TECHM",
-        "TITAN", "TORNTPHARM", "TRENT", "TVSMOTOR", "UBL", "ULTRACEMCO", "UPL", "VEDL",
-        "VOLTAS", "WIPRO", "ZEEL"
-    }
+    print(f"ℹ️ Cloud runner using robust fallback universe ({len(FALLBACK_FO_SYMBOLS)} symbols).")
+    return FALLBACK_FO_SYMBOLS
 
 
 def compute_chandelier_exit(df: pd.DataFrame, period: int = 22, mult: float = 3.0):
@@ -133,12 +137,16 @@ def run_institutional_engine():
         print("⚠️ No EQ records found in database meeting the initial price filter.")
         return
 
-    df_raw["Symbol_Clean"] = df_raw["Symbol"].str.upper().str.strip()
-    df_raw = df_raw[df_raw["Symbol_Clean"].isin(fo_symbols)].copy()
+    # Clean symbol formatting to prevent mismatch
+    df_raw["Symbol_Clean"] = df_raw["Symbol"].astype(str).str.upper().str.strip()
+    df_raw["Symbol_Clean"] = df_raw["Symbol_Clean"].str.replace("-EQ", "", regex=False)
 
-    if df_raw.empty:
-        print("⚠️ No stocks matched the active F&O universe.")
-        return
+    matched_df = df_raw[df_raw["Symbol_Clean"].isin(fo_symbols)].copy()
+    if matched_df.empty:
+        print("⚠️ Strict F&O filter found 0 matches; evaluating all EQ database symbols.")
+        matched_df = df_raw.copy()
+
+    df_raw = matched_df
 
     df_raw["Date_DT"] = pd.to_datetime(df_raw["Date"])
     latest_date_str = df_raw['Date_DT'].max().strftime("%d-%m-%Y")
@@ -146,7 +154,7 @@ def run_institutional_engine():
     all_scored_signals = []
 
     for symbol, df_sym in df_raw.groupby('Symbol'):
-        if len(df_sym) < CE_PERIOD + 5:
+        if len(df_sym) < 15:
             continue
 
         df = df_sym.copy().sort_values("Date_DT").reset_index(drop=True)
@@ -209,7 +217,6 @@ def run_institutional_engine():
         deliv_pct_val = round(float(np.nan_to_num(row['DeliveryPct'], nan=0.0)), 2)
         spike_ratio = round(float(curr_d / (avg_d5 + 1e-5)), 2)
 
-        # UNIFIED CLEAN SCHEMA
         all_scored_signals.append({
             "Date": latest_date_str,
             "Symbol": symbol,
@@ -230,10 +237,16 @@ def run_institutional_engine():
     os.makedirs("data", exist_ok=True)
     today_df = pd.DataFrame(all_scored_signals).sort_values("BRS_Score", ascending=False) if all_scored_signals else pd.DataFrame()
 
+    clean_columns = [
+        "Date", "Symbol", "Timeframe", "Type", "Pattern", "BRS_Score",
+        "Entry", "SL", "Target", "Close", "Volume",
+        "DeliveryQty", "DeliveryPct", "DelivSpikeRatio"
+    ]
+
     if os.path.exists(SIGNALS_CSV):
         try:
             existing_df = pd.read_csv(SIGNALS_CSV)
-            # Remove any existing entries for today, keep history
+            # Remove any duplicate records for the latest date and keep historical ones
             existing_df = existing_df[existing_df['Date'] != latest_date_str]
             combined_df = pd.concat([today_df, existing_df], ignore_index=True)
         except Exception:
@@ -241,15 +254,7 @@ def run_institutional_engine():
     else:
         combined_df = today_df
 
-    # Standardize column list
-    clean_columns = [
-        "Date", "Symbol", "Timeframe", "Type", "Pattern", "BRS_Score",
-        "Entry", "SL", "Target", "Close", "Volume",
-        "DeliveryQty", "DeliveryPct", "DelivSpikeRatio"
-    ]
-
     if not combined_df.empty:
-        # Keep only the columns that belong in the clean schema
         available_cols = [c for c in clean_columns if c in combined_df.columns]
         combined_df = combined_df[available_cols]
         combined_df['Date_DT'] = pd.to_datetime(combined_df['Date'], format="%d-%m-%Y", errors='coerce')
@@ -259,7 +264,7 @@ def run_institutional_engine():
         final_export_df = pd.DataFrame(columns=clean_columns)
 
     final_export_df.to_csv(SIGNALS_CSV, index=False)
-    print(f"✅ Saved clean candidates for {latest_date_str}.")
+    print(f"✅ Processed {len(today_df)} signals for latest date {latest_date_str}.")
 
     top_candidates = today_df.to_dict('records') if not today_df.empty else []
     try:
