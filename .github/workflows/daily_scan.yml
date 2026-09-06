@@ -31,13 +31,19 @@ jobs:
         run: |
           python backfill_90days.py
 
-      - name: Run Strategy Scanner Engine
+      - - name: Run Strategy Scanner Engine
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: |
           python scanner_engine.py
 
+      - name: Track Active Breakouts & Lifecycles
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          python tracker_engine.py
       - name: Inspect Stored Data Health
         run: |
           python check_data.py
