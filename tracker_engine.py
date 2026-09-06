@@ -12,7 +12,7 @@ from datetime import datetime
 DB_PATH = "data/candles.duckdb"
 SIGNALS_CSV = "data/signals.csv"
 ACTIVE_WATCHLIST_CSV = "data/active_watchlist.csv"
-MAX_HOLD_DAYS = 3  # T+3 Expiry rule
+MAX_HOLD_DAYS = 3  # T+3 Expiry Rule
 
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN") or os.getenv("TELEGRAM_TOKEN") or os.getenv("BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID") or os.getenv("CHAT_ID")
@@ -76,7 +76,6 @@ def sync_signals_to_watchlist():
     if signals_df.empty or 'Symbol' not in signals_df.columns:
         return pd.DataFrame()
 
-    # Enforce strict F&O filter
     signals_df['Symbol_Clean'] = signals_df['Symbol'].astype(str).str.upper().str.strip()
     signals_df = signals_df[signals_df['Symbol_Clean'].isin(NSE_FO_SYMBOLS)].copy()
 
@@ -118,11 +117,11 @@ def sync_signals_to_watchlist():
 
 
 def update_lifecycle_and_track():
-    print("🎯 Running F&O Lifecycle Tracker Engine...")
+    print("🎯 Running Unified F&O Lifecycle Table Engine...")
 
     watchlist = sync_signals_to_watchlist()
     if watchlist.empty:
-        print("ℹ️ No active F&O setups in watchlist to evaluate.")
+        print("ℹ️ No active F&O setups found to evaluate.")
         return
 
     if not os.path.exists(DB_PATH):
@@ -154,10 +153,8 @@ def update_lifecycle_and_track():
         sym = str(row["Symbol"]).upper().strip()
         entry = float(row["Entry"])
         sl = float(row["SL"])
-        target = float(row["Target"])
         days = int(row.get("Days_Active", 0))
 
-        # Preserve terminal states silently (no spam)
         if status in ["EXPIRED", "STOPPED_OUT", "TARGET_HIT"]:
             updated_records.append(row.to_dict())
             continue
@@ -169,11 +166,7 @@ def update_lifecycle_and_track():
         today = candle_map[sym]
         today_high = float(today["High"])
         today_low = float(today["Low"])
-        today_close = float(today["Close"])
 
-        # ---------------------------------------------
-        # PENDING STATE
-        # ---------------------------------------------
         if status == "PENDING":
             days += 1
             if today_low <= sl:
@@ -183,45 +176,17 @@ def update_lifecycle_and_track():
                 row["Status"] = "TRIGGERED"
                 row["Trigger_Date"] = latest_date_str
                 row["Days_Active"] = days
-
-                # ONLY SEND INDIVIDUAL TELEGRAM ON ACTUAL TRIGGER
-                send_telegram_msg(
-                    f"🚀 <b>BREAKOUT TRIGGERED NOW!</b>\n"
-                    f"━━━━━━━━━━━━━━━━━━━━\n"
-                    f"📈 <b>Stock:</b> {sym} (NSE F&O EQ)\n"
-                    f"🎯 <b>Crossed Entry Level :</b> ₹{entry:.2f} (High ₹{today_high:.2f})\n"
-                    f"🛑 <b>Active Stop Loss     :</b> ₹{sl:.2f}\n"
-                    f"🎯 <b>Target (3.0x R:R)    :</b> ₹{target:.2f}\n"
-                    f"⏱ <b>Session Date         :</b> {latest_date_str}\n"
-                    f"━━━━━━━━━━━━━━━━━━━━\n"
-                    f"📈 <a href='https://in.tradingview.com/chart/?symbol=NSE:{sym}'>Open TradingView Chart</a>"
-                )
             elif days >= MAX_HOLD_DAYS:
                 row["Status"] = "EXPIRED"
                 row["Days_Active"] = days
             else:
                 row["Days_Active"] = days
 
-        # ---------------------------------------------
-        # TRIGGERED STATE
-        # ---------------------------------------------
         elif status == "TRIGGERED":
             if today_low <= sl:
                 row["Status"] = "STOPPED_OUT"
-                send_telegram_msg(
-                    f"🛑 <b>STOP LOSS HIT</b>\n"
-                    f"━━━━━━━━━━━━━━━━━━━━\n"
-                    f"📉 <b>Stock:</b> {sym} (Low hit ₹{today_low:.2f} <= SL ₹{sl:.2f})\n"
-                    f"🚫 Close position immediately."
-                )
-            elif today_high >= target:
+            elif today_high >= float(row["Target"]):
                 row["Status"] = "TARGET_HIT"
-                send_telegram_msg(
-                    f"🏆 <b>TARGET ACHIEVED (3x R:R)!</b>\n"
-                    f"━━━━━━━━━━━━━━━━━━━━\n"
-                    f"💰 <b>Stock:</b> {sym} (High reached ₹{today_high:.2f} >= Target ₹{target:.2f})\n"
-                    f"🎉 Book profits or trail SL."
-                )
 
         updated_records.append(row.to_dict())
 
@@ -229,53 +194,70 @@ def update_lifecycle_and_track():
     os.makedirs("data", exist_ok=True)
     updated_df.to_csv(ACTIVE_WATCHLIST_CSV, index=False)
 
-    # SEND CONSOLIDATED TELEGRAM DASHBOARD
-    send_active_dashboard_telegram(updated_df, latest_date_str)
+    # Broadcast single consolidated table dashboard to Telegram
+    send_consolidated_table_telegram(updated_df, latest_date_str)
 
 
-def send_active_dashboard_telegram(df: pd.DataFrame, date_str: str):
+def send_consolidated_table_telegram(df: pd.DataFrame, date_str: str):
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
         return
 
-    # Filter strictly for active/pending F&O setups
-    pending_df = df[df["Status"] == "PENDING"]
     triggered_df = df[df["Status"] == "TRIGGERED"]
+    pending_df = df[df["Status"] == "PENDING"]
 
-    msg_lines = [
-        f"🏛️ <b>BRAHMASTRA F&O RADAR DASHBOARD</b>",
-        f"📅 <i>Session Date: {date_str}</i>",
-        f"━━━━━━━━━━━━━━━━━━━━"
+    msg_parts = [
+        f"🏛️ <b>BRAHMASTRA BREAKOUT RADAR</b>",
+        f"📅 <i>Session: {date_str}</i>\n"
     ]
 
-    # Section 1: Active Triggered Trades
-    msg_lines.append(f"🟢 <b>ACTIVE POSITIONS ({len(triggered_df)})</b>")
+    # 1. Triggered Table (Breakout Active)
+    msg_parts.append(f"🚀 <b>BREAKOUT TRIGGERED NOW ({len(triggered_df)})</b>")
     if not triggered_df.empty:
+        header = f"{'Symbol':<10} {'Entry':<8} {'SL':<8} {'Target':<8}"
+        sep = "-" * len(header)
+        rows = [header, sep]
         for _, r in triggered_df.iterrows():
-            msg_lines.append(
-                f"• <b>{r['Symbol']}</b> | Entry: ₹{r['Entry']:.2f} | SL: ₹{r['SL']:.2f} | Target: ₹{r['Target']:.2f}"
-            )
+            sym = str(r['Symbol'])[:9]
+            entry_s = f"{float(r['Entry']):.1f}"
+            sl_s = f"{float(r['SL']):.1f}"
+            tgt_s = f"{float(r['Target']):.1f}"
+            rows.append(f"{sym:<10} {entry_s:<8} {sl_s:<8} {tgt_s:<8}")
+        
+        table_str = "\n".join(rows)
+        msg_parts.append(f"<pre>\n{table_str}\n</pre>")
+
+        # TradingView direct Links
+        tv_links = " | ".join([f"<a href='https://in.tradingview.com/chart/?symbol=NSE:{r['Symbol']}'>{r['Symbol']}</a>" for _, r in triggered_df.iterrows()])
+        msg_parts.append(f"📈 <b>Charts:</b> {tv_links}\n")
     else:
-        msg_lines.append("<i>No open active positions.</i>")
+        msg_parts.append("<i>No active triggered breakouts today.</i>\n")
 
-    msg_lines.append("\n━━━━━━━━━━━━━━━━━━━━")
-
-    # Section 2: Pending Breakout Watchlist (T+1 to T+3)
-    msg_lines.append(f"⏳ <b>PENDING BREAKOUT WATCHLIST ({len(pending_df)})</b>")
+    # 2. Waiting to Breakout Table (Pending T+1 to T+3)
+    msg_parts.append(f"⏳ <b>WAITING FOR BREAKOUT ({len(pending_df)})</b>")
     if not pending_df.empty:
+        header_p = f"{'Symbol':<9} {'Age':<4} {'Buy>':<8} {'SL':<8}"
+        sep_p = "-" * len(header_p)
+        rows_p = [header_p, sep_p]
         for _, r in pending_df.iterrows():
-            hold_str = f"T+{r['Days_Active']}"
-            msg_lines.append(
-                f"• <b>{r['Symbol']}</b> ({hold_str}) ➔ <b>Buy Above:</b> ₹{r['Entry']:.2f} | SL: ₹{r['SL']:.2f}"
-            )
+            sym = str(r['Symbol'])[:8]
+            age = f"T+{r['Days_Active']}"
+            entry_s = f"{float(r['Entry']):.1f}"
+            sl_s = f"{float(r['SL']):.1f}"
+            rows_p.append(f"{sym:<9} {age:<4} {entry_s:<8} {sl_s:<8}")
+
+        table_str_p = "\n".join(rows_p)
+        msg_parts.append(f"<pre>\n{table_str_p}\n</pre>")
+
+        tv_links_p = " | ".join([f"<a href='https://in.tradingview.com/chart/?symbol=NSE:{r['Symbol']}'>{r['Symbol']}</a>" for _, r in pending_df.iterrows()])
+        msg_parts.append(f"📈 <b>Charts:</b> {tv_links_p}\n")
     else:
-        msg_lines.append("<i>No pending breakout setups.</i>")
+        msg_parts.append("<i>No setups currently pending.</i>\n")
 
-    msg_lines.append("━━━━━━━━━━━━━━━━━━━━")
-    msg_lines.append(f"🌐 <a href='{DASHBOARD_URL}'>Open Interactive Web Dashboard</a>")
+    msg_parts.append(f"🌐 <a href='{DASHBOARD_URL}'>Open Full Terminal Dashboard</a>")
 
-    full_message = "\n".join(msg_lines)
+    full_message = "\n".join(msg_parts)
     send_telegram_msg(full_message)
-    print("✅ Dispatched unified F&O radar dashboard to Telegram.")
+    print("✅ Dispatched table-formatted dashboard to Telegram.")
 
 
 if __name__ == "__main__":
