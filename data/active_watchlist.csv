@@ -1,1 +1,4 @@
-Date,Symbol,Timeframe,Type,Pattern,BRS_Score,Entry,SL,Target,Close,Volume,DeliveryQty,DeliveryPct,DelivSpikeRatio
+Date,Symbol,Entry,SL,Target,Close,Status,Days_Active,Trigger_Date
+04-09-2026,HDFCLIFE,548.05,532.54,594.58,546.4,PENDING,1,
+04-09-2026,IGL,159.55,148.6,192.4,158.04,PENDING,1,
+04-09-2026,HAL,4936.05,4817.4,5292.0,4856.0,STOPPED_OUT,1,
