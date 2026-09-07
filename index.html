@@ -55,6 +55,7 @@
             background: rgba(59, 130, 246, 0.1); color: var(--accent-blue);
             padding: 0.4rem 0.85rem; border-radius: 9999px; font-size: 0.8rem;
             font-weight: 600; border: 1px solid rgba(59, 130, 246, 0.2);
+            white-space: nowrap;
         }
 
         .controls {
@@ -75,7 +76,7 @@
             margin-bottom: 2rem;
         }
 
-        table { width: 100%; border-collapse: collapse; text-align: left; font-size: 0.85rem; min-width: 900px; }
+        table { width: 100%; border-collapse: collapse; text-align: left; font-size: 0.85rem; min-width: 950px; }
         th {
             background-color: rgba(31, 41, 55, 0.5); color: var(--text-muted); font-weight: 600;
             padding: 0.85rem 1rem; text-transform: uppercase; font-size: 0.725rem;
@@ -89,7 +90,9 @@
         .badge-triggered { background: rgba(16, 185, 129, 0.2); color: var(--accent-green); border: 1px solid rgba(16, 185, 129, 0.4); }
         .badge-pending { background: rgba(245, 158, 11, 0.2); color: var(--accent-amber); border: 1px solid rgba(245, 158, 11, 0.4); }
         .badge-stopped { background: rgba(239, 68, 68, 0.2); color: var(--accent-red); border: 1px solid rgba(239, 68, 68, 0.4); }
-        .badge-long { background: rgba(59, 130, 246, 0.15); color: var(--accent-blue); border: 1px solid rgba(59, 130, 246, 0.3); }
+        .badge-target { background: rgba(59, 130, 246, 0.2); color: var(--accent-blue); border: 1px solid rgba(59, 130, 246, 0.4); }
+
+        .badge-long { background: rgba(16, 185, 129, 0.15); color: var(--accent-green); border: 1px solid rgba(16, 185, 129, 0.3); }
         .badge-short { background: rgba(239, 68, 68, 0.15); color: var(--accent-red); border: 1px solid rgba(239, 68, 68, 0.3); }
 
         .btn-chart {
@@ -97,6 +100,7 @@
             background-color: rgba(59, 130, 246, 0.1); color: var(--accent-blue);
             padding: 0.35rem 0.65rem; border-radius: 0.375rem; text-decoration: none;
             font-size: 0.725rem; font-weight: 600; border: 1px solid rgba(59, 130, 246, 0.2);
+            transition: all 0.2s;
         }
         .btn-chart:hover { background-color: var(--accent-blue); color: #ffffff; }
         .empty-state { padding: 3rem; text-align: center; color: var(--text-muted); }
@@ -122,12 +126,12 @@
     <!-- VIEW 1: ACTIVE BREAKOUT RADAR (active_watchlist.csv) -->
     <div id="radarView">
         <div class="controls">
-            <input type="text" id="radarSearch" class="search-box" placeholder="Filter active symbols (e.g. CUB, HDFCLIFE)..." oninput="filterRadar()">
+            <input type="text" id="radarSearch" class="search-box" placeholder="Search symbol (e.g. CUB, MFSL)..." oninput="filterRadar()">
             <select id="statusFilter" class="filter-select" onchange="filterRadar()">
-                <option value="ALL">All States (Active & Expired)</option>
+                <option value="ACTIVE" selected>All Active (Waiting & Triggered)</option>
+                <option value="PENDING">⏳ WAITING FOR BREAKOUT (PENDING)</option>
                 <option value="TRIGGERED">🚀 TRIGGERED NOW</option>
-                <option value="PENDING" selected>⏳ WAITING FOR BREAKOUT (PENDING)</option>
-                <option value="STOPPED_OUT">🛑 STOPPED OUT / INVALIDATED</option>
+                <option value="ALL">All States (Inc. Stopped Out & Expired)</option>
             </select>
         </div>
 
@@ -137,13 +141,13 @@
                     <tr>
                         <th>Date Registered</th>
                         <th>Symbol</th>
-                        <th>Type</th>
+                        <th>Bias</th>
                         <th>Lifecycle Status</th>
                         <th>Age</th>
-                        <th>Trigger Level</th>
+                        <th>Actionable Level</th>
                         <th>Stop Loss</th>
                         <th>Target (3x)</th>
-                        <th>Chart</th>
+                        <th>TradingView</th>
                     </tr>
                 </thead>
                 <tbody id="radarTableBody">
@@ -156,7 +160,7 @@
     <!-- VIEW 2: HISTORICAL SIGNALS (signals.csv) -->
     <div id="signalsView" style="display: none;">
         <div class="controls">
-            <input type="text" id="sigSearch" class="search-box" placeholder="Search Symbol..." oninput="filterSignals()">
+            <input type="text" id="sigSearch" class="search-box" placeholder="Search Historical Symbol..." oninput="filterSignals()">
             <select id="biasFilter" class="filter-select" onchange="filterSignals()">
                 <option value="ALL" selected>All Directions (Long & Short)</option>
                 <option value="LONG">🟢 Bullish Delta Surge (Long)</option>
@@ -171,13 +175,13 @@
                         <th>Date</th>
                         <th>Symbol</th>
                         <th>Direction</th>
-                        <th>Pattern / Flow</th>
-                        <th>Trigger Level</th>
+                        <th>Pattern / Flow Setup</th>
+                        <th>Trigger Entry</th>
                         <th>Stop Loss</th>
                         <th>Target (3x)</th>
                         <th>Delivery %</th>
                         <th>Delta Surge</th>
-                        <th>Chart</th>
+                        <th>TradingView</th>
                     </tr>
                 </thead>
                 <tbody id="signalsTableBody">
@@ -204,11 +208,11 @@
 
         function updateStatsBadge() {
             if (currentTab === 'radar') {
-                const pendingCount = radarData.filter(r => r.Status === 'PENDING').length;
-                const trigCount = radarData.filter(r => r.Status === 'TRIGGERED').length;
-                document.getElementById('recordCount').innerText = `${trigCount} Triggered | ${pendingCount} Waiting`;
+                const pendingCount = radarData.filter(r => (r.Status || 'PENDING').toUpperCase() === 'PENDING').length;
+                const trigCount = radarData.filter(r => (r.Status || '').toUpperCase() === 'TRIGGERED').length;
+                document.getElementById('recordCount').innerText = `${trigCount} Triggered | ${pendingCount} Waiting (T+1 to T+3)`;
             } else {
-                document.getElementById('recordCount').innerText = `${signalsData.length} Total Signals`;
+                document.getElementById('recordCount').innerText = `${signalsData.length} Total Historical Setups`;
             }
         }
 
@@ -220,13 +224,13 @@
                     header: true,
                     skipEmptyLines: true,
                     complete: function(res) {
-                        radarData = res.data.filter(r => r.Symbol);
+                        radarData = res.data.filter(r => (r.Symbol || r.symbol));
                         filterRadar();
                     }
                 });
             })
             .catch(() => {
-                document.getElementById('radarTableBody').innerHTML = `<tr><td colspan="9" class="empty-state">No active watchlist data found. Run workflow to populate.</td></tr>`;
+                document.getElementById('radarTableBody').innerHTML = `<tr><td colspan="9" class="empty-state">No active watchlist data found. Run scanner workflow.</td></tr>`;
             });
 
         // 2. Fetch Historical Signals
@@ -237,7 +241,7 @@
                     header: true,
                     skipEmptyLines: true,
                     complete: function(res) {
-                        signalsData = res.data.filter(r => r.Symbol);
+                        signalsData = res.data.filter(r => (r.Symbol || r.symbol));
                         filterSignals();
                     }
                 });
@@ -245,13 +249,20 @@
 
         function filterRadar() {
             const query = document.getElementById('radarSearch').value.trim().toUpperCase();
-            const status = document.getElementById('statusFilter').value;
+            const statusFilter = document.getElementById('statusFilter').value;
 
             const filtered = radarData.filter(row => {
-                const sym = (row.Symbol || '').toUpperCase();
-                const st = (row.Status || '').toUpperCase();
+                const sym = (row.Symbol || row.symbol || '').toUpperCase();
+                const st = (row.Status || row.status || 'PENDING').toUpperCase();
                 const matchesQuery = sym.includes(query);
-                const matchesStatus = (status === 'ALL') || (st === status);
+
+                let matchesStatus = true;
+                if (statusFilter === 'ACTIVE') {
+                    matchesStatus = (st === 'PENDING' || st === 'TRIGGERED');
+                } else if (statusFilter !== 'ALL') {
+                    matchesStatus = (st === statusFilter);
+                }
+
                 return matchesQuery && matchesStatus;
             });
 
@@ -263,26 +274,31 @@
             const tbody = document.getElementById('radarTableBody');
             tbody.innerHTML = '';
             if (data.length === 0) {
-                tbody.innerHTML = `<tr><td colspan="9" class="empty-state">No setups found matching criteria.</td></tr>`;
+                tbody.innerHTML = `<tr><td colspan="9" class="empty-state">No active setups found matching selected status.</td></tr>`;
                 return;
             }
 
             data.forEach(r => {
-                const sym = r.Symbol || 'N/A';
-                const date = r.Date || 'N/A';
-                const type = (r.Type || 'LONG').toUpperCase();
-                const status = (r.Status || 'PENDING').toUpperCase();
-                const days = r.Days_Active ? `T+${r.Days_Active}` : 'T+1';
-                const entry = parseFloat(r.Entry || 0).toFixed(2);
-                const sl = parseFloat(r.SL || 0).toFixed(2);
-                const tgt = parseFloat(r.Target || 0).toFixed(2);
+                const sym = r.Symbol || r.symbol || 'N/A';
+                const date = r.Date || r.date || 'N/A';
+                const type = (r.Type || r.type || 'LONG').toUpperCase();
+                const status = (r.Status || r.status || 'PENDING').toUpperCase();
+                const ageDays = r.Days_Active || r.days_active || '1';
+                const entry = parseFloat(r.Entry || r.entry || 0).toFixed(2);
+                const sl = parseFloat(r.SL || r.sl || 0).toFixed(2);
+                const tgt = parseFloat(r.Target || r.target || 0).toFixed(2);
                 const tvUrl = `https://in.tradingview.com/chart/?symbol=NSE:${sym}`;
 
                 let statusBadge = `<span class="badge badge-pending">⏳ WAITING</span>`;
                 if (status === 'TRIGGERED') statusBadge = `<span class="badge badge-triggered">🚀 TRIGGERED</span>`;
                 if (status === 'STOPPED_OUT') statusBadge = `<span class="badge badge-stopped">🛑 INVALIDATED</span>`;
+                if (status === 'TARGET_HIT') statusBadge = `<span class="badge badge-target">🏆 TARGET HIT</span>`;
 
-                const typeBadge = type === 'SHORT' ? `<span class="badge badge-short">SHORT</span>` : `<span class="badge badge-long">LONG</span>`;
+                const typeBadge = type === 'SHORT' 
+                    ? `<span class="badge badge-short">🔴 SHORT</span>` 
+                    : `<span class="badge badge-long">🟢 LONG</span>`;
+
+                const actionLabel = type === 'SHORT' ? `Sell < ₹${entry}` : `Buy > ₹${entry}`;
 
                 const tr = document.createElement('tr');
                 tr.innerHTML = `
@@ -290,8 +306,8 @@
                     <td><strong>${sym}</strong></td>
                     <td>${typeBadge}</td>
                     <td>${statusBadge}</td>
-                    <td><strong>${days}</strong></td>
-                    <td>₹${entry}</td>
+                    <td><strong style="color: var(--accent-amber);">T+${ageDays}</strong></td>
+                    <td><strong>${actionLabel}</strong></td>
                     <td>₹${sl}</td>
                     <td>₹${tgt}</td>
                     <td><a href="${tvUrl}" target="_blank" class="btn-chart">Chart ↗</a></td>
@@ -305,8 +321,8 @@
             const bias = document.getElementById('biasFilter').value;
 
             const filtered = signalsData.filter(row => {
-                const sym = (row.Symbol || '').toUpperCase();
-                const type = (row.Type || 'LONG').toUpperCase();
+                const sym = (row.Symbol || row.symbol || '').toUpperCase();
+                const type = (row.Type || row.type || 'LONG').toUpperCase();
                 return sym.includes(query) && (bias === 'ALL' || type === bias);
             });
 
@@ -323,25 +339,27 @@
             }
 
             data.forEach(row => {
-                const date = row.Date || 'N/A';
-                const sym = row.Symbol || 'N/A';
-                const type = (row.Type || 'LONG').toUpperCase();
-                const pattern = row.Pattern || 'BULLISH_DELTA_SURGE';
-                const entry = parseFloat(row.Entry || 0).toFixed(2);
-                const sl = parseFloat(row.SL || 0).toFixed(2);
-                const tgt = parseFloat(row.Target || 0).toFixed(2);
-                const delivPct = parseFloat(row.DeliveryPct || 0).toFixed(1);
-                const deltaSurge = parseFloat(row.DelivSpikeRatio || 1.0).toFixed(2);
+                const date = row.Date || row.date || 'N/A';
+                const sym = row.Symbol || row.symbol || 'N/A';
+                const type = (row.Type || row.type || 'LONG').toUpperCase();
+                const pattern = row.Pattern || row.pattern || (type === 'SHORT' ? 'BEARISH_DELTA_SURGE' : 'BULLISH_DELTA_SURGE');
+                const entry = parseFloat(row.Entry || row.entry || 0).toFixed(2);
+                const sl = parseFloat(row.SL || row.sl || 0).toFixed(2);
+                const tgt = parseFloat(row.Target || row.target || 0).toFixed(2);
+                const delivPct = parseFloat(row.DeliveryPct || row.deliverypct || 0).toFixed(1);
+                const deltaSurge = parseFloat(row.DelivSpikeRatio || row.delivspikeratio || 1.0).toFixed(2);
                 const tvUrl = `https://in.tradingview.com/chart/?symbol=NSE:${sym}`;
 
-                const typeBadge = type === 'SHORT' ? `<span class="badge badge-short">SHORT</span>` : `<span class="badge badge-long">LONG</span>`;
+                const typeBadge = type === 'SHORT' 
+                    ? `<span class="badge badge-short">🔴 SHORT</span>` 
+                    : `<span class="badge badge-long">🟢 LONG</span>`;
 
                 const tr = document.createElement('tr');
                 tr.innerHTML = `
                     <td>${date}</td>
                     <td><strong>${sym}</strong></td>
                     <td>${typeBadge}</td>
-                    <td><span class="badge badge-long">${pattern}</span></td>
+                    <td><span class="badge ${type === 'SHORT' ? 'badge-short' : 'badge-long'}">${pattern}</span></td>
                     <td>₹${entry}</td>
                     <td>₹${sl}</td>
                     <td>₹${tgt}</td>
