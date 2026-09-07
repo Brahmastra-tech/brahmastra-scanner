@@ -183,12 +183,6 @@
             border: 1px solid rgba(16, 185, 129, 0.3);
         }
 
-        .badge-breakdown {
-            background: rgba(239, 68, 68, 0.15);
-            color: var(--accent-red);
-            border: 1px solid rgba(239, 68, 68, 0.3);
-        }
-
         .btn-chart {
             display: inline-flex;
             align-items: center;
@@ -227,13 +221,13 @@
             </div>
         </div>
         <div class="header-actions">
-            <div class="stats-badge" id="signalCount">Loading...</div>
+            <div class="stats-badge" id="signalCount">Loading signals...</div>
             <button class="btn-export" id="exportBtn">📥 Export CSV</button>
         </div>
     </div>
 
     <div class="controls">
-        <input type="text" id="searchInput" class="search-box" placeholder="Search Symbol (e.g. RELIANCE, SBILIFE)...">
+        <input type="text" id="searchInput" class="search-box" placeholder="Search Symbol (e.g. CUB, HDFCLIFE)...">
         
         <div class="date-picker-wrapper">
             <span>Date:</span>
@@ -241,9 +235,8 @@
         </div>
 
         <select id="patternFilter" class="filter-select">
-            <option value="ALL">All Patterns</option>
+            <option value="ALL" selected>All Patterns</option>
             <option value="PRE_BREAKOUT">PRE_BREAKOUT</option>
-            <option value="ORDER_FLOW_SURGE">ORDER_FLOW_SURGE</option>
         </select>
     </div>
 
@@ -275,12 +268,9 @@
         let allData = [];
         let filteredData = [];
 
-        // Fetch signals.csv with query param to bypass cache
         fetch('data/signals.csv?t=' + Date.now())
             .then(response => {
-                if (!response.ok) {
-                    throw new Error('CSV file not found');
-                }
+                if (!response.ok) throw new Error('signals.csv not found');
                 return response.text();
             })
             .then(csvText => {
@@ -296,10 +286,9 @@
                 });
             })
             .catch(error => {
-                console.error('Error fetching CSV:', error);
                 document.getElementById('signalsTableBody').innerHTML = `
                     <tr>
-                        <td colspan="9" class="empty-state">⚠️ No signals found in history or scanner hasn't executed yet.</td>
+                        <td colspan="9" class="empty-state">⚠️ No signals found in history.</td>
                     </tr>
                 `;
                 document.getElementById('signalCount').innerText = `0 Signals`;
@@ -322,22 +311,18 @@
                 const date = row.Date || row.date || 'N/A';
                 const symbol = row.Symbol || row.symbol || 'N/A';
                 const pattern = row.Pattern || row.pattern || row.Type || row.type || 'PRE_BREAKOUT';
-                
                 const entry = parseFloat(row.Entry || row.entry || 0).toFixed(2);
                 const sl = parseFloat(row.SL || row.sl || 0).toFixed(2);
                 const target = parseFloat(row.Target || row.target || 0).toFixed(2);
-                
                 const delivPct = parseFloat(row.DeliveryPct || 0).toFixed(1);
                 const deltaSurge = parseFloat(row.DelivSpikeRatio || 1.0).toFixed(2);
-
-                const badgeClass = pattern.includes('BREAKDOWN') ? 'badge-breakdown' : 'badge-breakout';
                 const tvUrl = `https://in.tradingview.com/chart/?symbol=NSE:${symbol}`;
 
                 const tr = document.createElement('tr');
                 tr.innerHTML = `
                     <td>${date}</td>
                     <td><strong>${symbol}</strong></td>
-                    <td><span class="badge ${badgeClass}">${pattern}</span></td>
+                    <td><span class="badge badge-breakout">${pattern}</span></td>
                     <td>₹${entry}</td>
                     <td>₹${sl}</td>
                     <td>₹${target}</td>
@@ -358,12 +343,10 @@
             const patternVal = document.getElementById('patternFilter').value;
             const dateVal = document.getElementById('dateFilter').value;
 
-            let formattedSearchDate = '';
+            let formattedDate = '';
             if (dateVal) {
-                const parts = dateVal.split('-');
-                if (parts.length === 3) {
-                    formattedSearchDate = `${parts[2]}-${parts[1]}-${parts[0]}`;
-                }
+                const p = dateVal.split('-');
+                if (p.length === 3) formattedDate = `${p[2]}-${p[1]}-${p[0]}`;
             }
 
             filteredData = allData.filter(row => {
@@ -372,8 +355,8 @@
                 const rowDate = (row.Date || row.date || '').trim();
 
                 const matchesSearch = symbol.includes(searchVal);
-                const matchesPattern = patternVal === 'ALL' || pattern === patternVal || pattern.includes(patternVal);
-                const matchesDate = !formattedSearchDate || rowDate === formattedSearchDate;
+                const matchesPattern = (patternVal === 'ALL') || (pattern === patternVal);
+                const matchesDate = !formattedDate || (rowDate === formattedDate);
 
                 return matchesSearch && matchesPattern && matchesDate;
             });
@@ -383,11 +366,7 @@
         }
 
         document.getElementById('exportBtn').addEventListener('click', () => {
-            if (!filteredData || filteredData.length === 0) {
-                alert('No data available to export.');
-                return;
-            }
-
+            if (!filteredData || filteredData.length === 0) return;
             const csv = Papa.unparse(filteredData);
             const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
             const url = URL.createObjectURL(blob);
