@@ -46,6 +46,7 @@ NSE_FO_SYMBOLS = frozenset({
 
 def send_telegram(html_text: str):
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
+        print("⚠️ Missing Telegram credentials.")
         return
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
     payload = {
@@ -55,40 +56,52 @@ def send_telegram(html_text: str):
         "disable_web_page_preview": True
     }
     try:
-        requests.post(url, json=payload, timeout=10)
-    except Exception:
-        pass
+        res = requests.post(url, json=payload, timeout=10)
+        if res.status_code != 200:
+            print(f"❌ Telegram API Error ({res.status_code}): {res.text}")
+        else:
+            print("🚀 Successfully sent Breakout Radar tables to Telegram!")
+    except Exception as err:
+        print(f"⚠️ Telegram Network Error: {err}")
 
 
 def update_lifecycle_and_track():
-    print("🎯 Running Dual-Direction Lifecycle Tracker Engine...")
+    print("🎯 Running Breakout Radar Tracker Engine...")
     if not os.path.exists(SIGNALS_CSV):
+        print("⚠️ signals.csv missing.")
         return
 
     signals_df = pd.read_csv(SIGNALS_CSV)
-    if signals_df.empty or 'Symbol' not in signals_df.columns:
+    if signals_df.empty:
+        print("ℹ️ signals.csv is empty.")
         return
 
     signals_df['Symbol_Clean'] = signals_df['Symbol'].astype(str).str.upper().str.strip()
     signals_df = signals_df[signals_df['Symbol_Clean'].isin(NSE_FO_SYMBOLS)].copy()
+
     signals_df['Date_Parsed'] = pd.to_datetime(signals_df['Date'], dayfirst=True, errors='coerce')
     signals_df['Date_Norm'] = signals_df['Date_Parsed'].dt.strftime("%Y-%m-%d")
 
+    # Connect to DuckDB & pull the latest available session candles
     conn = duckdb.connect(DB_PATH)
     candles_df = conn.execute("""
-        WITH max_d AS (SELECT MAX(CAST(timestamp AS DATE)) as md FROM ohlcv_candles)
         SELECT symbol AS Symbol, CAST(timestamp AS DATE) AS Date, high AS High, low AS Low, close AS Close
-        FROM ohlcv_candles WHERE CAST(timestamp AS DATE) = (SELECT md FROM max_d)
+        FROM ohlcv_candles
+        WHERE CAST(timestamp AS DATE) = (SELECT MAX(CAST(timestamp AS DATE)) FROM ohlcv_candles)
     """).df()
     conn.close()
 
     if candles_df.empty:
-        return
+        # Fallback to signals date if DuckDB empty
+        latest_session_norm = signals_df['Date_Norm'].max()
+        latest_session_display = signals_df['Date_Parsed'].dt.strftime("%d-%m-%Y").max()
+        candle_dict = {}
+    else:
+        latest_session_norm = pd.to_datetime(candles_df['Date'].max()).strftime("%Y-%m-%d")
+        latest_session_display = pd.to_datetime(candles_df['Date'].max()).strftime("%d-%m-%Y")
+        candle_dict = candles_df.set_index("Symbol").to_dict("index")
 
-    latest_session_norm = pd.to_datetime(candles_df['Date'].max()).strftime("%Y-%m-%d")
-    latest_session_display = pd.to_datetime(candles_df['Date'].max()).strftime("%d-%m-%Y")
-    candle_dict = candles_df.set_index("Symbol").to_dict("index")
-
+    # Load active watchlist
     wl_df = pd.DataFrame()
     if os.path.exists(ACTIVE_WATCHLIST_CSV):
         try:
@@ -103,16 +116,18 @@ def update_lifecycle_and_track():
     if not wl_df.empty and 'Date_Norm' in wl_df.columns:
         existing_keys = set(zip(wl_df['Date_Norm'].astype(str), wl_df['Symbol_Clean']))
 
+    # Intake new signals
     new_items = []
     for _, row in signals_df.iterrows():
         key = (str(row['Date_Norm']), row['Symbol_Clean'])
         if key not in existing_keys:
             is_today = (str(row['Date_Norm']) == latest_session_norm)
+            direction = "SHORT" if "BEARISH" in str(row.get('Pattern', '')).upper() or str(row.get('Type', '')).upper() == "SHORT" else "LONG"
             new_items.append({
                 "Date": row['Date'],
                 "Date_Norm": str(row['Date_Norm']),
                 "Symbol": row['Symbol_Clean'],
-                "Type": str(row.get('Type', 'LONG')),
+                "Type": direction,
                 "Entry": float(row['Entry']),
                 "SL": float(row['SL']),
                 "Target": float(row['Target']),
@@ -125,6 +140,7 @@ def update_lifecycle_and_track():
     if new_items:
         wl_df = pd.concat([wl_df, pd.DataFrame(new_items)], ignore_index=True)
 
+    # Evaluate lifecycle states
     updated = []
     for _, row in wl_df.iterrows():
         sym = row['Symbol']
@@ -140,12 +156,14 @@ def update_lifecycle_and_track():
             updated.append(row.to_dict())
             continue
 
+        # Day 0 setups stay PENDING
         if sig_date_norm == latest_session_norm:
             row['Status'] = "PENDING"
             row['Days_Active'] = 1
             updated.append(row.to_dict())
             continue
 
+        # Day 1+ setups: evaluate against today's actual candle
         if sym in candle_dict:
             c = candle_dict[sym]
             hi, lo = float(c['High']), float(c['Low'])
@@ -170,9 +188,9 @@ def update_lifecycle_and_track():
 
             elif sig_type == "SHORT":
                 if status == "PENDING":
-                    if hi >= sl:  # Short invalidated if price rises above SL
+                    if hi >= sl:
                         row['Status'] = "STOPPED_OUT"
-                    elif lo <= entry:  # Short triggered when price drops below low entry
+                    elif lo <= entry:
                         row['Status'] = "TRIGGERED"
                         row['Trigger_Date'] = latest_session_norm
                     else:
@@ -191,6 +209,7 @@ def update_lifecycle_and_track():
     final_wl = pd.DataFrame(updated)
     os.makedirs("data", exist_ok=True)
     final_wl.to_csv(ACTIVE_WATCHLIST_CSV, index=False)
+    print(f"💾 Updated active_watchlist.csv ({len(final_wl)} setups tracked)")
 
     send_telegram_radar_table(final_wl, latest_session_display)
 
@@ -208,16 +227,16 @@ def send_telegram_radar_table(df: pd.DataFrame, date_str: str):
         "━━━━━━━━━━━━━━━━━━━━\n"
     ]
 
-    # SECTION 1: Triggered Table
+    # SECTION 1: Active Triggered Positions
     msg_lines.append(f"🚀 <b>TRIGGERED POSITIONS ({len(triggered)})</b>")
     if not triggered.empty:
-        t_header = f"{'Symbol':<9} {'Type':<6} {'Entry':<8} {'SL':<8} {'Tgt':<8}"
+        t_header = f"{'Symbol':<9} {'Bias':<5} {'Entry':<8} {'SL':<8} {'Tgt':<8}"
         t_sep = "-" * len(t_header)
         t_rows = [t_header, t_sep]
         for _, r in triggered.iterrows():
             sym = str(r['Symbol'])[:8]
-            t_type = "BUY" if str(r.get('Type', 'LONG')).upper() == "LONG" else "SELL"
-            t_rows.append(f"{sym:<9} {t_type:<6} {float(r['Entry']):<8.1f} {float(r['SL']):<8.1f} {float(r['Target']):<8.1f}")
+            bias = "BUY" if str(r.get('Type', 'LONG')).upper() == "LONG" else "SELL"
+            t_rows.append(f"{sym:<9} {bias:<5} {float(r['Entry']):<8.1f} {float(r['SL']):<8.1f} {float(r['Target']):<8.1f}")
         t_block = "\n".join(t_rows)
         msg_lines.append(f"<pre>{t_block}</pre>")
         links = " | ".join([f"<a href='https://in.tradingview.com/chart/?symbol=NSE:{r['Symbol']}'>{r['Symbol']}</a>" for _, r in triggered.iterrows()])
@@ -225,7 +244,7 @@ def send_telegram_radar_table(df: pd.DataFrame, date_str: str):
     else:
         msg_lines.append("<i>No active positions triggered today.</i>\n")
 
-    # SECTION 2: Pending Table
+    # SECTION 2: Pending Breakout Watchlist
     msg_lines.append(f"⏳ <b>WAITING FOR TRIGGER ({len(pending)})</b>")
     if not pending.empty:
         p_header = f"{'Symbol':<9} {'Bias':<5} {'Age':<4} {'Level':<8} {'SL':<8}"
@@ -234,7 +253,7 @@ def send_telegram_radar_table(df: pd.DataFrame, date_str: str):
         for _, r in pending.iterrows():
             sym = str(r['Symbol'])[:8]
             bias = "LONG" if str(r.get('Type', 'LONG')).upper() == "LONG" else "SHRT"
-            age = f"T+{int(r['Days_Active'])}"
+            age = f"T+{int(r.get('Days_Active', 1))}"
             p_rows.append(f"{sym:<9} {bias:<5} {age:<4} {float(r['Entry']):<8.1f} {float(r['SL']):<8.1f}")
         p_block = "\n".join(p_rows)
         msg_lines.append(f"<pre>{p_block}</pre>")
@@ -243,7 +262,7 @@ def send_telegram_radar_table(df: pd.DataFrame, date_str: str):
     else:
         msg_lines.append("<i>No setups currently pending.</i>\n")
 
-    msg_lines.append(f"🌐 <a href='{DASHBOARD_URL}'>Open Web Terminal</a>")
+    msg_lines.append(f"🌐 <a href='{DASHBOARD_URL}'>Open Live Terminal</a>")
     send_telegram("\n".join(msg_lines))
 
 
