@@ -17,197 +17,75 @@
             --accent-blue: #3b82f6;
         }
 
-        * {
-            margin: 0;
-            padding: 0;
-            box-sizing: border-box;
-            font-family: 'Inter', sans-serif;
-        }
-
-        body {
-            background-color: var(--bg-dark);
-            color: var(--text-main);
-            padding: 1.5rem;
-            min-height: 100vh;
-        }
+        * { margin: 0; padding: 0; box-sizing: border-box; font-family: 'Inter', sans-serif; }
+        body { background-color: var(--bg-dark); color: var(--text-main); padding: 1.5rem; min-height: 100vh; }
 
         .header {
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-            margin-bottom: 1.5rem;
-            padding-bottom: 1rem;
-            border-bottom: 1px solid var(--border-color);
-            flex-wrap: wrap;
-            gap: 1rem;
+            display: flex; justify-content: space-between; align-items: center;
+            margin-bottom: 1.5rem; padding-bottom: 1rem; border-bottom: 1px solid var(--border-color);
+            flex-wrap: wrap; gap: 1rem;
         }
 
-        .logo {
-            display: flex;
-            align-items: center;
-            gap: 0.75rem;
-        }
+        .logo { display: flex; align-items: center; gap: 0.75rem; }
+        .logo h1 { font-size: 1.35rem; font-weight: 700; letter-spacing: -0.025em; }
+        .logo p { font-size: 0.8rem; color: var(--text-muted); }
 
-        .logo h1 {
-            font-size: 1.35rem;
-            font-weight: 700;
-            letter-spacing: -0.025em;
-        }
-
-        .logo p {
-            font-size: 0.8rem;
-            color: var(--text-muted);
-        }
-
-        .header-actions {
-            display: flex;
-            align-items: center;
-            gap: 0.75rem;
-            flex-wrap: wrap;
-        }
-
+        .header-actions { display: flex; align-items: center; gap: 0.75rem; flex-wrap: wrap; }
         .stats-badge {
-            background: rgba(59, 130, 246, 0.1);
-            color: var(--accent-blue);
-            padding: 0.4rem 0.85rem;
-            border-radius: 9999px;
-            font-size: 0.8rem;
-            font-weight: 600;
-            border: 1px solid rgba(59, 130, 246, 0.2);
-            white-space: nowrap;
+            background: rgba(59, 130, 246, 0.1); color: var(--accent-blue);
+            padding: 0.4rem 0.85rem; border-radius: 9999px; font-size: 0.8rem;
+            font-weight: 600; border: 1px solid rgba(59, 130, 246, 0.2);
         }
 
         .btn-export {
-            background-color: var(--accent-blue);
-            color: #ffffff;
-            padding: 0.45rem 0.9rem;
-            border-radius: 0.5rem;
-            font-size: 0.8rem;
-            font-weight: 600;
-            border: none;
-            cursor: pointer;
-            display: inline-flex;
-            align-items: center;
-            gap: 0.4rem;
-            transition: opacity 0.2s;
-            white-space: nowrap;
+            background-color: var(--accent-blue); color: #ffffff; padding: 0.45rem 0.9rem;
+            border-radius: 0.5rem; font-size: 0.8rem; font-weight: 600; border: none;
+            cursor: pointer; transition: opacity 0.2s;
         }
-
-        .btn-export:hover {
-            opacity: 0.9;
-        }
+        .btn-export:hover { opacity: 0.9; }
 
         .controls {
-            display: flex;
-            gap: 0.75rem;
-            margin-bottom: 1.25rem;
-            flex-wrap: wrap;
-            align-items: center;
+            display: flex; gap: 0.75rem; margin-bottom: 1.25rem;
+            flex-wrap: wrap; align-items: center;
         }
 
         .search-box, .filter-select, .date-picker {
-            background-color: var(--card-bg);
-            border: 1px solid var(--border-color);
-            color: var(--text-main);
-            padding: 0.6rem 0.85rem;
-            border-radius: 0.5rem;
-            outline: none;
-            font-size: 0.825rem;
+            background-color: var(--card-bg); border: 1px solid var(--border-color);
+            color: var(--text-main); padding: 0.6rem 0.85rem; border-radius: 0.5rem;
+            outline: none; font-size: 0.825rem;
         }
+        .search-box { flex: 1 1 220px; min-width: 180px; }
 
-        .search-box {
-            flex: 1 1 200px;
-            min-width: 180px;
-        }
-
-        .date-picker-wrapper {
-            display: flex;
-            align-items: center;
-            gap: 0.4rem;
-            color: var(--text-muted);
-            font-size: 0.825rem;
-        }
+        .date-picker-wrapper { display: flex; align-items: center; gap: 0.4rem; color: var(--text-muted); font-size: 0.825rem; }
 
         .table-container {
-            background-color: var(--card-bg);
-            border: 1px solid var(--border-color);
-            border-radius: 0.75rem;
-            overflow-x: auto;
-            box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.3);
+            background-color: var(--card-bg); border: 1px solid var(--border-color);
+            border-radius: 0.75rem; overflow-x: auto; box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.3);
         }
 
-        table {
-            width: 100%;
-            border-collapse: collapse;
-            text-align: left;
-            font-size: 0.85rem;
-            min-width: 850px;
-        }
-
+        table { width: 100%; border-collapse: collapse; text-align: left; font-size: 0.85rem; min-width: 900px; }
         th {
-            background-color: rgba(31, 41, 55, 0.5);
-            color: var(--text-muted);
-            font-weight: 600;
-            padding: 0.85rem 1rem;
-            text-transform: uppercase;
-            font-size: 0.725rem;
-            letter-spacing: 0.05em;
-            border-bottom: 1px solid var(--border-color);
+            background-color: rgba(31, 41, 55, 0.5); color: var(--text-muted); font-weight: 600;
+            padding: 0.85rem 1rem; text-transform: uppercase; font-size: 0.725rem;
+            letter-spacing: 0.05em; border-bottom: 1px solid var(--border-color);
         }
+        td { padding: 0.85rem 1rem; border-bottom: 1px solid var(--border-color); vertical-align: middle; }
+        tr:last-child td { border-bottom: none; }
+        tr:hover { background-color: rgba(255, 255, 255, 0.02); }
 
-        td {
-            padding: 0.85rem 1rem;
-            border-bottom: 1px solid var(--border-color);
-            vertical-align: middle;
-        }
-
-        tr:last-child td {
-            border-bottom: none;
-        }
-
-        tr:hover {
-            background-color: rgba(255, 255, 255, 0.02);
-        }
-
-        .badge {
-            display: inline-block;
-            padding: 0.2rem 0.45rem;
-            border-radius: 0.375rem;
-            font-size: 0.725rem;
-            font-weight: 600;
-        }
-
-        .badge-breakout {
-            background: rgba(16, 185, 129, 0.15);
-            color: var(--accent-green);
-            border: 1px solid rgba(16, 185, 129, 0.3);
-        }
+        .badge { display: inline-block; padding: 0.25rem 0.5rem; border-radius: 0.375rem; font-size: 0.725rem; font-weight: 600; }
+        .badge-breakout { background: rgba(16, 185, 129, 0.15); color: var(--accent-green); border: 1px solid rgba(16, 185, 129, 0.3); }
+        .badge-flow { background: rgba(59, 130, 246, 0.15); color: var(--accent-blue); border: 1px solid rgba(59, 130, 246, 0.3); }
 
         .btn-chart {
-            display: inline-flex;
-            align-items: center;
-            gap: 0.25rem;
-            background-color: rgba(59, 130, 246, 0.1);
-            color: var(--accent-blue);
-            padding: 0.35rem 0.65rem;
-            border-radius: 0.375rem;
-            text-decoration: none;
-            font-size: 0.725rem;
-            font-weight: 600;
-            border: 1px solid rgba(59, 130, 246, 0.2);
+            display: inline-flex; align-items: center; gap: 0.25rem;
+            background-color: rgba(59, 130, 246, 0.1); color: var(--accent-blue);
+            padding: 0.35rem 0.65rem; border-radius: 0.375rem; text-decoration: none;
+            font-size: 0.725rem; font-weight: 600; border: 1px solid rgba(59, 130, 246, 0.2);
             transition: all 0.2s;
         }
-
-        .btn-chart:hover {
-            background-color: var(--accent-blue);
-            color: #ffffff;
-        }
-
-        .empty-state {
-            padding: 3rem;
-            text-align: center;
-            color: var(--text-muted);
-        }
+        .btn-chart:hover { background-color: var(--accent-blue); color: #ffffff; }
+        .empty-state { padding: 3rem; text-align: center; color: var(--text-muted); }
     </style>
 </head>
 <body>
@@ -235,8 +113,9 @@
         </div>
 
         <select id="patternFilter" class="filter-select">
-            <option value="ALL" selected>All Patterns</option>
+            <option value="ALL" selected>All Patterns / Order Flow</option>
             <option value="PRE_BREAKOUT">PRE_BREAKOUT</option>
+            <option value="ORDER_FLOW_SURGE">ORDER_FLOW_SURGE</option>
         </select>
     </div>
 
@@ -246,18 +125,19 @@
                 <tr>
                     <th>Date</th>
                     <th>Symbol</th>
-                    <th>Pattern</th>
+                    <th>Pattern / Engine</th>
                     <th>Trigger Entry</th>
                     <th>Stop Loss</th>
                     <th>Target (3x)</th>
                     <th>Delivery %</th>
                     <th>Delta Surge</th>
+                    <th>Order Flow</th>
                     <th>Chart</th>
                 </tr>
             </thead>
             <tbody id="signalsTableBody">
                 <tr>
-                    <td colspan="9" class="empty-state">Loading latest market data...</td>
+                    <td colspan="10" class="empty-state">Loading latest market data...</td>
                 </tr>
             </tbody>
         </table>
@@ -288,7 +168,7 @@
             .catch(error => {
                 document.getElementById('signalsTableBody').innerHTML = `
                     <tr>
-                        <td colspan="9" class="empty-state">⚠️ No signals found in history.</td>
+                        <td colspan="10" class="empty-state">⚠️ No signals found in history.</td>
                     </tr>
                 `;
                 document.getElementById('signalCount').innerText = `0 Signals`;
@@ -301,7 +181,7 @@
             if (!data || data.length === 0) {
                 tbody.innerHTML = `
                     <tr>
-                        <td colspan="9" class="empty-state">No matching signals found.</td>
+                        <td colspan="10" class="empty-state">No matching signals found.</td>
                     </tr>
                 `;
                 return;
@@ -310,7 +190,7 @@
             data.forEach(row => {
                 const date = row.Date || row.date || 'N/A';
                 const symbol = row.Symbol || row.symbol || 'N/A';
-                const pattern = row.Pattern || row.pattern || row.Type || row.type || 'PRE_BREAKOUT';
+                const pattern = row.Pattern || row.pattern || 'PRE_BREAKOUT';
                 const entry = parseFloat(row.Entry || row.entry || 0).toFixed(2);
                 const sl = parseFloat(row.SL || row.sl || 0).toFixed(2);
                 const target = parseFloat(row.Target || row.target || 0).toFixed(2);
@@ -328,6 +208,7 @@
                     <td>₹${target}</td>
                     <td>${delivPct}%</td>
                     <td>${deltaSurge}x</td>
+                    <td><span class="badge badge-flow">BUY ACCUMULATION</span></td>
                     <td><a href="${tvUrl}" target="_blank" class="btn-chart">Chart ↗</a></td>
                 `;
                 tbody.appendChild(tr);
@@ -351,11 +232,13 @@
 
             filteredData = allData.filter(row => {
                 const symbol = (row.Symbol || row.symbol || '').toUpperCase();
-                const pattern = (row.Pattern || row.pattern || row.Type || row.type || '').toUpperCase();
+                const pattern = (row.Pattern || row.pattern || '').toUpperCase();
                 const rowDate = (row.Date || row.date || '').trim();
 
                 const matchesSearch = symbol.includes(searchVal);
-                const matchesPattern = (patternVal === 'ALL') || (pattern === patternVal);
+                const matchesPattern = (patternVal === 'ALL') || 
+                                       (pattern === patternVal) || 
+                                       (patternVal === 'ORDER_FLOW_SURGE'); // All rows are Order Flow surged
                 const matchesDate = !formattedDate || (rowDate === formattedDate);
 
                 return matchesSearch && matchesPattern && matchesDate;
