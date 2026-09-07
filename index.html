@@ -15,6 +15,7 @@
             --accent-green: #10b981;
             --accent-red: #ef4444;
             --accent-blue: #3b82f6;
+            --accent-amber: #f59e0b;
         }
 
         * { margin: 0; padding: 0; box-sizing: border-box; font-family: 'Inter', sans-serif; }
@@ -22,7 +23,7 @@
 
         .header {
             display: flex; justify-content: space-between; align-items: center;
-            margin-bottom: 1.5rem; padding-bottom: 1rem; border-bottom: 1px solid var(--border-color);
+            margin-bottom: 1.25rem; padding-bottom: 1rem; border-bottom: 1px solid var(--border-color);
             flex-wrap: wrap; gap: 1rem;
         }
 
@@ -31,18 +32,30 @@
         .logo p { font-size: 0.8rem; color: var(--text-muted); }
 
         .header-actions { display: flex; align-items: center; gap: 0.75rem; flex-wrap: wrap; }
+        
+        .tab-btn {
+            background-color: var(--card-bg);
+            border: 1px solid var(--border-color);
+            color: var(--text-muted);
+            padding: 0.5rem 1rem;
+            border-radius: 0.5rem;
+            font-size: 0.825rem;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+
+        .tab-btn.active {
+            background-color: var(--accent-blue);
+            color: #ffffff;
+            border-color: var(--accent-blue);
+        }
+
         .stats-badge {
             background: rgba(59, 130, 246, 0.1); color: var(--accent-blue);
             padding: 0.4rem 0.85rem; border-radius: 9999px; font-size: 0.8rem;
             font-weight: 600; border: 1px solid rgba(59, 130, 246, 0.2);
         }
-
-        .btn-export {
-            background-color: var(--accent-blue); color: #ffffff; padding: 0.45rem 0.9rem;
-            border-radius: 0.5rem; font-size: 0.8rem; font-weight: 600; border: none;
-            cursor: pointer; transition: opacity 0.2s;
-        }
-        .btn-export:hover { opacity: 0.9; }
 
         .controls {
             display: flex; gap: 0.75rem; margin-bottom: 1.25rem;
@@ -56,11 +69,10 @@
         }
         .search-box { flex: 1 1 220px; min-width: 180px; }
 
-        .date-picker-wrapper { display: flex; align-items: center; gap: 0.4rem; color: var(--text-muted); font-size: 0.825rem; }
-
         .table-container {
             background-color: var(--card-bg); border: 1px solid var(--border-color);
             border-radius: 0.75rem; overflow-x: auto; box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.3);
+            margin-bottom: 2rem;
         }
 
         table { width: 100%; border-collapse: collapse; text-align: left; font-size: 0.85rem; min-width: 900px; }
@@ -74,15 +86,17 @@
         tr:hover { background-color: rgba(255, 255, 255, 0.02); }
 
         .badge { display: inline-block; padding: 0.25rem 0.5rem; border-radius: 0.375rem; font-size: 0.725rem; font-weight: 600; }
-        .badge-breakout { background: rgba(16, 185, 129, 0.15); color: var(--accent-green); border: 1px solid rgba(16, 185, 129, 0.3); }
-        .badge-flow { background: rgba(59, 130, 246, 0.15); color: var(--accent-blue); border: 1px solid rgba(59, 130, 246, 0.3); }
+        .badge-triggered { background: rgba(16, 185, 129, 0.2); color: var(--accent-green); border: 1px solid rgba(16, 185, 129, 0.4); }
+        .badge-pending { background: rgba(245, 158, 11, 0.2); color: var(--accent-amber); border: 1px solid rgba(245, 158, 11, 0.4); }
+        .badge-stopped { background: rgba(239, 68, 68, 0.2); color: var(--accent-red); border: 1px solid rgba(239, 68, 68, 0.4); }
+        .badge-long { background: rgba(59, 130, 246, 0.15); color: var(--accent-blue); border: 1px solid rgba(59, 130, 246, 0.3); }
+        .badge-short { background: rgba(239, 68, 68, 0.15); color: var(--accent-red); border: 1px solid rgba(239, 68, 68, 0.3); }
 
         .btn-chart {
             display: inline-flex; align-items: center; gap: 0.25rem;
             background-color: rgba(59, 130, 246, 0.1); color: var(--accent-blue);
             padding: 0.35rem 0.65rem; border-radius: 0.375rem; text-decoration: none;
             font-size: 0.725rem; font-weight: 600; border: 1px solid rgba(59, 130, 246, 0.2);
-            transition: all 0.2s;
         }
         .btn-chart:hover { background-color: var(--accent-blue); color: #ffffff; }
         .empty-state { padding: 3rem; text-align: center; color: var(--text-muted); }
@@ -95,171 +109,249 @@
             <span style="font-size: 1.5rem;">🏛️</span>
             <div>
                 <h1>BRAHMASTRA SCANNER</h1>
-                <p>NSE F&O Chandelier Exit & Order Flow Terminal</p>
+                <p>NSE F&O Institutional Order Flow & Lifecycle Terminal</p>
             </div>
         </div>
         <div class="header-actions">
-            <div class="stats-badge" id="signalCount">Loading signals...</div>
-            <button class="btn-export" id="exportBtn">📥 Export CSV</button>
+            <button class="tab-btn active" id="tabRadarBtn" onclick="switchTab('radar')">🎯 Active Breakouts Radar</button>
+            <button class="tab-btn" id="tabSignalsBtn" onclick="switchTab('signals')">📜 Historical Signals (140+)</button>
+            <div class="stats-badge" id="recordCount">Loading...</div>
         </div>
     </div>
 
-    <div class="controls">
-        <input type="text" id="searchInput" class="search-box" placeholder="Search Symbol (e.g. CUB, HDFCLIFE)...">
-        
-        <div class="date-picker-wrapper">
-            <span>Date:</span>
-            <input type="date" id="dateFilter" class="date-picker">
+    <!-- VIEW 1: ACTIVE BREAKOUT RADAR (active_watchlist.csv) -->
+    <div id="radarView">
+        <div class="controls">
+            <input type="text" id="radarSearch" class="search-box" placeholder="Filter active symbols (e.g. CUB, HDFCLIFE)..." oninput="filterRadar()">
+            <select id="statusFilter" class="filter-select" onchange="filterRadar()">
+                <option value="ALL">All States (Active & Expired)</option>
+                <option value="TRIGGERED">🚀 TRIGGERED NOW</option>
+                <option value="PENDING" selected>⏳ WAITING FOR BREAKOUT (PENDING)</option>
+                <option value="STOPPED_OUT">🛑 STOPPED OUT / INVALIDATED</option>
+            </select>
         </div>
 
-        <select id="patternFilter" class="filter-select">
-            <option value="ALL" selected>All Patterns / Order Flow</option>
-            <option value="PRE_BREAKOUT">PRE_BREAKOUT</option>
-            <option value="ORDER_FLOW_SURGE">ORDER_FLOW_SURGE</option>
-        </select>
+        <div class="table-container">
+            <table>
+                <thead>
+                    <tr>
+                        <th>Date Registered</th>
+                        <th>Symbol</th>
+                        <th>Type</th>
+                        <th>Lifecycle Status</th>
+                        <th>Age</th>
+                        <th>Trigger Level</th>
+                        <th>Stop Loss</th>
+                        <th>Target (3x)</th>
+                        <th>Chart</th>
+                    </tr>
+                </thead>
+                <tbody id="radarTableBody">
+                    <tr><td colspan="9" class="empty-state">Loading Active Radar Setups...</td></tr>
+                </tbody>
+            </table>
+        </div>
     </div>
 
-    <div class="table-container">
-        <table>
-            <thead>
-                <tr>
-                    <th>Date</th>
-                    <th>Symbol</th>
-                    <th>Pattern / Engine</th>
-                    <th>Trigger Entry</th>
-                    <th>Stop Loss</th>
-                    <th>Target (3x)</th>
-                    <th>Delivery %</th>
-                    <th>Delta Surge</th>
-                    <th>Order Flow</th>
-                    <th>Chart</th>
-                </tr>
-            </thead>
-            <tbody id="signalsTableBody">
-                <tr>
-                    <td colspan="10" class="empty-state">Loading latest market data...</td>
-                </tr>
-            </tbody>
-        </table>
+    <!-- VIEW 2: HISTORICAL SIGNALS (signals.csv) -->
+    <div id="signalsView" style="display: none;">
+        <div class="controls">
+            <input type="text" id="sigSearch" class="search-box" placeholder="Search Symbol..." oninput="filterSignals()">
+            <select id="biasFilter" class="filter-select" onchange="filterSignals()">
+                <option value="ALL" selected>All Directions (Long & Short)</option>
+                <option value="LONG">🟢 Bullish Delta Surge (Long)</option>
+                <option value="SHORT">🔴 Bearish Delta Surge (Short)</option>
+            </select>
+        </div>
+
+        <div class="table-container">
+            <table>
+                <thead>
+                    <tr>
+                        <th>Date</th>
+                        <th>Symbol</th>
+                        <th>Direction</th>
+                        <th>Pattern / Flow</th>
+                        <th>Trigger Level</th>
+                        <th>Stop Loss</th>
+                        <th>Target (3x)</th>
+                        <th>Delivery %</th>
+                        <th>Delta Surge</th>
+                        <th>Chart</th>
+                    </tr>
+                </thead>
+                <tbody id="signalsTableBody">
+                    <tr><td colspan="10" class="empty-state">Loading History...</td></tr>
+                </tbody>
+            </table>
+        </div>
     </div>
 
     <script src="https://cdnjs.cloudflare.com/ajax/libs/PapaParse/5.3.2/papaparse.min.js"></script>
     <script>
-        let allData = [];
-        let filteredData = [];
+        let radarData = [];
+        let signalsData = [];
+        let currentTab = 'radar';
 
-        fetch('data/signals.csv?t=' + Date.now())
-            .then(response => {
-                if (!response.ok) throw new Error('signals.csv not found');
-                return response.text();
-            })
-            .then(csvText => {
-                Papa.parse(csvText, {
+        function switchTab(tab) {
+            currentTab = tab;
+            document.getElementById('tabRadarBtn').classList.toggle('active', tab === 'radar');
+            document.getElementById('tabSignalsBtn').classList.toggle('active', tab === 'signals');
+            document.getElementById('radarView').style.display = tab === 'radar' ? 'block' : 'none';
+            document.getElementById('signalsView').style.display = tab === 'signals' ? 'block' : 'none';
+            updateStatsBadge();
+        }
+
+        function updateStatsBadge() {
+            if (currentTab === 'radar') {
+                const pendingCount = radarData.filter(r => r.Status === 'PENDING').length;
+                const trigCount = radarData.filter(r => r.Status === 'TRIGGERED').length;
+                document.getElementById('recordCount').innerText = `${trigCount} Triggered | ${pendingCount} Waiting`;
+            } else {
+                document.getElementById('recordCount').innerText = `${signalsData.length} Total Signals`;
+            }
+        }
+
+        // 1. Fetch Active Watchlist (Radar)
+        fetch('data/active_watchlist.csv?t=' + Date.now())
+            .then(res => res.text())
+            .then(csv => {
+                Papa.parse(csv, {
                     header: true,
                     skipEmptyLines: true,
-                    complete: function(results) {
-                        allData = results.data.filter(r => (r.symbol || r.Symbol));
-                        filteredData = allData;
-                        document.getElementById('signalCount').innerText = `${allData.length} Total Signals`;
-                        renderTable(allData);
+                    complete: function(res) {
+                        radarData = res.data.filter(r => r.Symbol);
+                        filterRadar();
                     }
                 });
             })
-            .catch(error => {
-                document.getElementById('signalsTableBody').innerHTML = `
-                    <tr>
-                        <td colspan="10" class="empty-state">⚠️ No signals found in history.</td>
-                    </tr>
-                `;
-                document.getElementById('signalCount').innerText = `0 Signals`;
+            .catch(() => {
+                document.getElementById('radarTableBody').innerHTML = `<tr><td colspan="9" class="empty-state">No active watchlist data found. Run workflow to populate.</td></tr>`;
             });
 
-        function renderTable(data) {
-            const tbody = document.getElementById('signalsTableBody');
-            tbody.innerHTML = '';
+        // 2. Fetch Historical Signals
+        fetch('data/signals.csv?t=' + Date.now())
+            .then(res => res.text())
+            .then(csv => {
+                Papa.parse(csv, {
+                    header: true,
+                    skipEmptyLines: true,
+                    complete: function(res) {
+                        signalsData = res.data.filter(r => r.Symbol);
+                        filterSignals();
+                    }
+                });
+            });
 
-            if (!data || data.length === 0) {
-                tbody.innerHTML = `
-                    <tr>
-                        <td colspan="10" class="empty-state">No matching signals found.</td>
-                    </tr>
-                `;
+        function filterRadar() {
+            const query = document.getElementById('radarSearch').value.trim().toUpperCase();
+            const status = document.getElementById('statusFilter').value;
+
+            const filtered = radarData.filter(row => {
+                const sym = (row.Symbol || '').toUpperCase();
+                const st = (row.Status || '').toUpperCase();
+                const matchesQuery = sym.includes(query);
+                const matchesStatus = (status === 'ALL') || (st === status);
+                return matchesQuery && matchesStatus;
+            });
+
+            renderRadar(filtered);
+            updateStatsBadge();
+        }
+
+        function renderRadar(data) {
+            const tbody = document.getElementById('radarTableBody');
+            tbody.innerHTML = '';
+            if (data.length === 0) {
+                tbody.innerHTML = `<tr><td colspan="9" class="empty-state">No setups found matching criteria.</td></tr>`;
                 return;
             }
 
-            data.forEach(row => {
-                const date = row.Date || row.date || 'N/A';
-                const symbol = row.Symbol || row.symbol || 'N/A';
-                const pattern = row.Pattern || row.pattern || 'PRE_BREAKOUT';
-                const entry = parseFloat(row.Entry || row.entry || 0).toFixed(2);
-                const sl = parseFloat(row.SL || row.sl || 0).toFixed(2);
-                const target = parseFloat(row.Target || row.target || 0).toFixed(2);
-                const delivPct = parseFloat(row.DeliveryPct || 0).toFixed(1);
-                const deltaSurge = parseFloat(row.DelivSpikeRatio || 1.0).toFixed(2);
-                const tvUrl = `https://in.tradingview.com/chart/?symbol=NSE:${symbol}`;
+            data.forEach(r => {
+                const sym = r.Symbol || 'N/A';
+                const date = r.Date || 'N/A';
+                const type = (r.Type || 'LONG').toUpperCase();
+                const status = (r.Status || 'PENDING').toUpperCase();
+                const days = r.Days_Active ? `T+${r.Days_Active}` : 'T+1';
+                const entry = parseFloat(r.Entry || 0).toFixed(2);
+                const sl = parseFloat(r.SL || 0).toFixed(2);
+                const tgt = parseFloat(r.Target || 0).toFixed(2);
+                const tvUrl = `https://in.tradingview.com/chart/?symbol=NSE:${sym}`;
+
+                let statusBadge = `<span class="badge badge-pending">⏳ WAITING</span>`;
+                if (status === 'TRIGGERED') statusBadge = `<span class="badge badge-triggered">🚀 TRIGGERED</span>`;
+                if (status === 'STOPPED_OUT') statusBadge = `<span class="badge badge-stopped">🛑 INVALIDATED</span>`;
+
+                const typeBadge = type === 'SHORT' ? `<span class="badge badge-short">SHORT</span>` : `<span class="badge badge-long">LONG</span>`;
 
                 const tr = document.createElement('tr');
                 tr.innerHTML = `
                     <td>${date}</td>
-                    <td><strong>${symbol}</strong></td>
-                    <td><span class="badge badge-breakout">${pattern}</span></td>
+                    <td><strong>${sym}</strong></td>
+                    <td>${typeBadge}</td>
+                    <td>${statusBadge}</td>
+                    <td><strong>${days}</strong></td>
                     <td>₹${entry}</td>
                     <td>₹${sl}</td>
-                    <td>₹${target}</td>
-                    <td>${delivPct}%</td>
-                    <td>${deltaSurge}x</td>
-                    <td><span class="badge badge-flow">BUY ACCUMULATION</span></td>
+                    <td>₹${tgt}</td>
                     <td><a href="${tvUrl}" target="_blank" class="btn-chart">Chart ↗</a></td>
                 `;
                 tbody.appendChild(tr);
             });
         }
 
-        document.getElementById('searchInput').addEventListener('input', filterData);
-        document.getElementById('dateFilter').addEventListener('change', filterData);
-        document.getElementById('patternFilter').addEventListener('change', filterData);
+        function filterSignals() {
+            const query = document.getElementById('sigSearch').value.trim().toUpperCase();
+            const bias = document.getElementById('biasFilter').value;
 
-        function filterData() {
-            const searchVal = document.getElementById('searchInput').value.trim().toUpperCase();
-            const patternVal = document.getElementById('patternFilter').value;
-            const dateVal = document.getElementById('dateFilter').value;
-
-            let formattedDate = '';
-            if (dateVal) {
-                const p = dateVal.split('-');
-                if (p.length === 3) formattedDate = `${p[2]}-${p[1]}-${p[0]}`;
-            }
-
-            filteredData = allData.filter(row => {
-                const symbol = (row.Symbol || row.symbol || '').toUpperCase();
-                const pattern = (row.Pattern || row.pattern || '').toUpperCase();
-                const rowDate = (row.Date || row.date || '').trim();
-
-                const matchesSearch = symbol.includes(searchVal);
-                const matchesPattern = (patternVal === 'ALL') || 
-                                       (pattern === patternVal) || 
-                                       (patternVal === 'ORDER_FLOW_SURGE'); // All rows are Order Flow surged
-                const matchesDate = !formattedDate || (rowDate === formattedDate);
-
-                return matchesSearch && matchesPattern && matchesDate;
+            const filtered = signalsData.filter(row => {
+                const sym = (row.Symbol || '').toUpperCase();
+                const type = (row.Type || 'LONG').toUpperCase();
+                return sym.includes(query) && (bias === 'ALL' || type === bias);
             });
 
-            document.getElementById('signalCount').innerText = `${filteredData.length} Filtered Signals`;
-            renderTable(filteredData);
+            renderSignals(filtered);
+            updateStatsBadge();
         }
 
-        document.getElementById('exportBtn').addEventListener('click', () => {
-            if (!filteredData || filteredData.length === 0) return;
-            const csv = Papa.unparse(filteredData);
-            const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
-            const url = URL.createObjectURL(blob);
-            const link = document.createElement('a');
-            link.setAttribute('href', url);
-            link.setAttribute('download', 'brahmastra_signals.csv');
-            document.body.appendChild(link);
-            link.click();
-            document.body.removeChild(link);
-        });
+        function renderSignals(data) {
+            const tbody = document.getElementById('signalsTableBody');
+            tbody.innerHTML = '';
+            if (data.length === 0) {
+                tbody.innerHTML = `<tr><td colspan="10" class="empty-state">No historical signals.</td></tr>`;
+                return;
+            }
+
+            data.forEach(row => {
+                const date = row.Date || 'N/A';
+                const sym = row.Symbol || 'N/A';
+                const type = (row.Type || 'LONG').toUpperCase();
+                const pattern = row.Pattern || 'BULLISH_DELTA_SURGE';
+                const entry = parseFloat(row.Entry || 0).toFixed(2);
+                const sl = parseFloat(row.SL || 0).toFixed(2);
+                const tgt = parseFloat(row.Target || 0).toFixed(2);
+                const delivPct = parseFloat(row.DeliveryPct || 0).toFixed(1);
+                const deltaSurge = parseFloat(row.DelivSpikeRatio || 1.0).toFixed(2);
+                const tvUrl = `https://in.tradingview.com/chart/?symbol=NSE:${sym}`;
+
+                const typeBadge = type === 'SHORT' ? `<span class="badge badge-short">SHORT</span>` : `<span class="badge badge-long">LONG</span>`;
+
+                const tr = document.createElement('tr');
+                tr.innerHTML = `
+                    <td>${date}</td>
+                    <td><strong>${sym}</strong></td>
+                    <td>${typeBadge}</td>
+                    <td><span class="badge badge-long">${pattern}</span></td>
+                    <td>₹${entry}</td>
+                    <td>₹${sl}</td>
+                    <td>₹${tgt}</td>
+                    <td>${delivPct}%</td>
+                    <td>${deltaSurge}x</td>
+                    <td><a href="${tvUrl}" target="_blank" class="btn-chart">Chart ↗</a></td>
+                `;
+                tbody.appendChild(tr);
+            });
+        }
     </script>
 </body>
 </html>
