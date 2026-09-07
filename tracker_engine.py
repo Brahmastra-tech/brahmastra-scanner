@@ -4,19 +4,15 @@ import duckdb
 import pandas as pd
 import numpy as np
 import requests
-from datetime import datetime
 
-# ==========================================
-# CONFIGURATION & CANONICAL F&O UNIVERSE
-# ==========================================
 DB_PATH = "data/candles.duckdb"
 SIGNALS_CSV = "data/signals.csv"
 ACTIVE_WATCHLIST_CSV = "data/active_watchlist.csv"
-MAX_HOLD_DAYS = 3  # T+3 Expiry Rule
+MAX_HOLD_DAYS = 3
 
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN") or os.getenv("TELEGRAM_TOKEN") or os.getenv("BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID") or os.getenv("CHAT_ID")
-DASHBOARD_URL = "[https://brahmastra-tech.github.io/brahmastra-scanner/](https://brahmastra-tech.github.io/brahmastra-scanner/)"
+DASHBOARD_URL = "https://brahmastra-tech.github.io/brahmastra-scanner/"
 
 NSE_FO_SYMBOLS = frozenset({
     "AARTIIND", "ABB", "ABBOTINDIA", "ABCAPITAL", "ABFRL", "ACC", "ADANIENT",
@@ -48,69 +44,51 @@ NSE_FO_SYMBOLS = frozenset({
 })
 
 
-def send_telegram(text: str):
+def send_telegram(html_text: str):
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
         return
-    url = f"[https://api.telegram.org/bot](https://api.telegram.org/bot){TELEGRAM_BOT_TOKEN}/sendMessage"
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
     payload = {
         "chat_id": TELEGRAM_CHAT_ID,
-        "text": text,
-        "parse_mode": "Markdown",
+        "text": html_text,
+        "parse_mode": "HTML",
         "disable_web_page_preview": True
     }
     try:
-        res = requests.post(url, json=payload, timeout=10)
-        if res.status_code != 200:
-            print(f"❌ Telegram Error ({res.status_code}): {res.text}")
-        else:
-            print("🚀 Radar table successfully delivered to Telegram!")
-    except Exception as err:
-        print(f"⚠️ Telegram Network Error: {err}")
+        requests.post(url, json=payload, timeout=10)
+    except Exception:
+        pass
 
 
 def update_lifecycle_and_track():
-    print("🎯 Running Breakout Radar & Lifecycle Engine...")
-
+    print("🎯 Running Dual-Direction Lifecycle Tracker Engine...")
     if not os.path.exists(SIGNALS_CSV):
-        print("⚠️ signals.csv not found.")
         return
 
     signals_df = pd.read_csv(SIGNALS_CSV)
     if signals_df.empty or 'Symbol' not in signals_df.columns:
-        print("ℹ️ signals.csv is empty.")
         return
 
-    # Strict F&O filtering
     signals_df['Symbol_Clean'] = signals_df['Symbol'].astype(str).str.upper().str.strip()
     signals_df = signals_df[signals_df['Symbol_Clean'].isin(NSE_FO_SYMBOLS)].copy()
+    signals_df['Date_Parsed'] = pd.to_datetime(signals_df['Date'], dayfirst=True, errors='coerce')
+    signals_df['Date_Norm'] = signals_df['Date_Parsed'].dt.strftime("%Y-%m-%d")
 
-    # Parse all dates into uniform YYYY-MM-DD strings
-    signals_df['Date_Obj'] = pd.to_datetime(signals_df['Date'], dayfirst=True, errors='coerce')
-    signals_df['Date_Norm'] = signals_df['Date_Obj'].dt.strftime("%Y-%m-%d")
-
-    # Fetch latest session data from DuckDB
     conn = duckdb.connect(DB_PATH)
     candles_df = conn.execute("""
-        SELECT 
-            symbol AS Symbol, 
-            CAST(timestamp AS DATE) AS Date,
-            high AS High,
-            low AS Low,
-            close AS Close
-        FROM ohlcv_candles
-        WHERE timestamp = (SELECT MAX(timestamp) FROM ohlcv_candles)
+        WITH max_d AS (SELECT MAX(CAST(timestamp AS DATE)) as md FROM ohlcv_candles)
+        SELECT symbol AS Symbol, CAST(timestamp AS DATE) AS Date, high AS High, low AS Low, close AS Close
+        FROM ohlcv_candles WHERE CAST(timestamp AS DATE) = (SELECT md FROM max_d)
     """).df()
     conn.close()
 
     if candles_df.empty:
-        print("⚠️ DuckDB candles empty.")
         return
 
     latest_session_norm = pd.to_datetime(candles_df['Date'].max()).strftime("%Y-%m-%d")
     latest_session_display = pd.to_datetime(candles_df['Date'].max()).strftime("%d-%m-%Y")
     candle_dict = candles_df.set_index("Symbol").to_dict("index")
 
-    # Load existing active watchlist
     wl_df = pd.DataFrame()
     if os.path.exists(ACTIVE_WATCHLIST_CSV):
         try:
@@ -125,7 +103,6 @@ def update_lifecycle_and_track():
     if not wl_df.empty and 'Date_Norm' in wl_df.columns:
         existing_keys = set(zip(wl_df['Date_Norm'].astype(str), wl_df['Symbol_Clean']))
 
-    # Ingest fresh signals
     new_items = []
     for _, row in signals_df.iterrows():
         key = (str(row['Date_Norm']), row['Symbol_Clean'])
@@ -135,6 +112,7 @@ def update_lifecycle_and_track():
                 "Date": row['Date'],
                 "Date_Norm": str(row['Date_Norm']),
                 "Symbol": row['Symbol_Clean'],
+                "Type": str(row.get('Type', 'LONG')),
                 "Entry": float(row['Entry']),
                 "SL": float(row['SL']),
                 "Target": float(row['Target']),
@@ -147,52 +125,66 @@ def update_lifecycle_and_track():
     if new_items:
         wl_df = pd.concat([wl_df, pd.DataFrame(new_items)], ignore_index=True)
 
-    # Process state machine
     updated = []
     for _, row in wl_df.iterrows():
         sym = row['Symbol']
         status = row['Status']
         sig_date_norm = str(row.get('Date_Norm', ''))
+        sig_type = str(row.get('Type', 'LONG')).upper()
         entry = float(row['Entry'])
         sl = float(row['SL'])
         target = float(row['Target'])
         days = int(row.get('Days_Active', 1))
 
-        # Locked terminal states
         if status in ["EXPIRED", "STOPPED_OUT", "TARGET_HIT"]:
             updated.append(row.to_dict())
             continue
 
-        # Rule: Today's fresh alert cannot be evaluated against today's candle
         if sig_date_norm == latest_session_norm:
             row['Status'] = "PENDING"
             row['Days_Active'] = 1
             updated.append(row.to_dict())
             continue
 
-        # Evaluate older signals (T-1, T-2) against today's price action
         if sym in candle_dict:
             c = candle_dict[sym]
-            hi = float(c['High'])
-            lo = float(c['Low'])
+            hi, lo = float(c['High']), float(c['Low'])
 
-            if status == "PENDING":
-                if lo <= sl:
-                    row['Status'] = "STOPPED_OUT"
-                elif hi >= entry:
-                    row['Status'] = "TRIGGERED"
-                    row['Trigger_Date'] = latest_session_norm
-                else:
-                    days += 1
-                    row['Days_Active'] = days
-                    if days > MAX_HOLD_DAYS:
-                        row['Status'] = "EXPIRED"
+            if sig_type == "LONG":
+                if status == "PENDING":
+                    if lo <= sl:
+                        row['Status'] = "STOPPED_OUT"
+                    elif hi >= entry:
+                        row['Status'] = "TRIGGERED"
+                        row['Trigger_Date'] = latest_session_norm
+                    else:
+                        days += 1
+                        row['Days_Active'] = days
+                        if days > MAX_HOLD_DAYS:
+                            row['Status'] = "EXPIRED"
+                elif status == "TRIGGERED":
+                    if lo <= sl:
+                        row['Status'] = "STOPPED_OUT"
+                    elif hi >= target:
+                        row['Status'] = "TARGET_HIT"
 
-            elif status == "TRIGGERED":
-                if lo <= sl:
-                    row['Status'] = "STOPPED_OUT"
-                elif hi >= target:
-                    row['Status'] = "TARGET_HIT"
+            elif sig_type == "SHORT":
+                if status == "PENDING":
+                    if hi >= sl:  # Short invalidated if price rises above SL
+                        row['Status'] = "STOPPED_OUT"
+                    elif lo <= entry:  # Short triggered when price drops below low entry
+                        row['Status'] = "TRIGGERED"
+                        row['Trigger_Date'] = latest_session_norm
+                    else:
+                        days += 1
+                        row['Days_Active'] = days
+                        if days > MAX_HOLD_DAYS:
+                            row['Status'] = "EXPIRED"
+                elif status == "TRIGGERED":
+                    if hi >= sl:
+                        row['Status'] = "STOPPED_OUT"
+                    elif lo <= target:
+                        row['Status'] = "TARGET_HIT"
 
         updated.append(row.to_dict())
 
@@ -200,7 +192,6 @@ def update_lifecycle_and_track():
     os.makedirs("data", exist_ok=True)
     final_wl.to_csv(ACTIVE_WATCHLIST_CSV, index=False)
 
-    # Dispatch formatted Markdown table
     send_telegram_radar_table(final_wl, latest_session_display)
 
 
@@ -211,47 +202,49 @@ def send_telegram_radar_table(df: pd.DataFrame, date_str: str):
     triggered = df[df["Status"] == "TRIGGERED"]
     pending = df[df["Status"] == "PENDING"]
 
-    lines = [
-        "🏛️ *BRAHMASTRA BREAKOUT RADAR*",
-        f"📅 _Session Date: {date_str}_\n"
+    msg_lines = [
+        "🏛️ <b>BRAHMASTRA ORDER FLOW RADAR</b>",
+        f"📅 <i>Session Date: {date_str}</i>",
+        "━━━━━━━━━━━━━━━━━━━━\n"
     ]
 
-    # Table 1: Triggered Breakouts
-    lines.append(f"🚀 *BREAKOUT TRIGGERED NOW ({len(triggered)})*")
+    # SECTION 1: Triggered Table
+    msg_lines.append(f"🚀 <b>TRIGGERED POSITIONS ({len(triggered)})</b>")
     if not triggered.empty:
-        t_header = f"{'Symbol':<9} {'Entry':<8} {'SL':<8} {'Target':<8}"
+        t_header = f"{'Symbol':<9} {'Type':<6} {'Entry':<8} {'SL':<8} {'Tgt':<8}"
         t_sep = "-" * len(t_header)
         t_rows = [t_header, t_sep]
         for _, r in triggered.iterrows():
             sym = str(r['Symbol'])[:8]
-            t_rows.append(f"{sym:<9} {float(r['Entry']):<8.1f} {float(r['SL']):<8.1f} {float(r['Target']):<8.1f}")
+            t_type = "BUY" if str(r.get('Type', 'LONG')).upper() == "LONG" else "SELL"
+            t_rows.append(f"{sym:<9} {t_type:<6} {float(r['Entry']):<8.1f} {float(r['SL']):<8.1f} {float(r['Target']):<8.1f}")
         t_block = "\n".join(t_rows)
-        lines.append(f"```\n{t_block}\n```")
-        links = " | ".join([f"[{r['Symbol']}](https://in.tradingview.com/chart/?symbol=NSE:{r['Symbol']})" for _, r in triggered.iterrows()])
-        lines.append(f"📈 *Charts:* {links}\n")
+        msg_lines.append(f"<pre>{t_block}</pre>")
+        links = " | ".join([f"<a href='https://in.tradingview.com/chart/?symbol=NSE:{r['Symbol']}'>{r['Symbol']}</a>" for _, r in triggered.iterrows()])
+        msg_lines.append(f"📈 <b>Charts:</b> {links}\n")
     else:
-        lines.append("_No open triggered breakouts._\n")
+        msg_lines.append("<i>No active positions triggered today.</i>\n")
 
-    # Table 2: Waiting for Breakout
-    lines.append(f"⏳ *WAITING FOR BREAKOUT ({len(pending)})*")
+    # SECTION 2: Pending Table
+    msg_lines.append(f"⏳ <b>WAITING FOR TRIGGER ({len(pending)})</b>")
     if not pending.empty:
-        p_header = f"{'Symbol':<9} {'Age':<4} {'Trigger':<8} {'SL':<8}"
+        p_header = f"{'Symbol':<9} {'Bias':<5} {'Age':<4} {'Level':<8} {'SL':<8}"
         p_sep = "-" * len(p_header)
         p_rows = [p_header, p_sep]
         for _, r in pending.iterrows():
             sym = str(r['Symbol'])[:8]
+            bias = "LONG" if str(r.get('Type', 'LONG')).upper() == "LONG" else "SHRT"
             age = f"T+{int(r['Days_Active'])}"
-            p_rows.append(f"{sym:<9} {age:<4} {float(r['Entry']):<8.1f} {float(r['SL']):<8.1f}")
+            p_rows.append(f"{sym:<9} {bias:<5} {age:<4} {float(r['Entry']):<8.1f} {float(r['SL']):<8.1f}")
         p_block = "\n".join(p_rows)
-        lines.append(f"```\n{p_block}\n```")
-        p_links = " | ".join([f"[{r['Symbol']}](https://in.tradingview.com/chart/?symbol=NSE:{r['Symbol']})" for _, r in pending.iterrows()])
-        lines.append(f"📈 *Charts:* {p_links}\n")
+        msg_lines.append(f"<pre>{p_block}</pre>")
+        p_links = " | ".join([f"<a href='https://in.tradingview.com/chart/?symbol=NSE:{r['Symbol']}'>{r['Symbol']}</a>" for _, r in pending.iterrows()])
+        msg_lines.append(f"📈 <b>Charts:</b> {p_links}\n")
     else:
-        lines.append("_No pending setups in radar._\n")
+        msg_lines.append("<i>No setups currently pending.</i>\n")
 
-    lines.append(f"🌐 [Open Web Dashboard]({DASHBOARD_URL})")
-
-    send_telegram("\n".join(lines))
+    msg_lines.append(f"🌐 <a href='{DASHBOARD_URL}'>Open Web Terminal</a>")
+    send_telegram("\n".join(msg_lines))
 
 
 if __name__ == "__main__":
