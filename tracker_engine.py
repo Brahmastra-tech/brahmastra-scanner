@@ -4,11 +4,12 @@ import duckdb
 import pandas as pd
 import numpy as np
 import requests
+from datetime import datetime, timedelta
 
 DB_PATH = "data/candles.duckdb"
 SIGNALS_CSV = "data/signals.csv"
 ACTIVE_WATCHLIST_CSV = "data/active_watchlist.csv"
-MAX_HOLD_DAYS = 3
+MAX_HOLD_DAYS = 3  # T+3 Expiry Rule
 
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN") or os.getenv("TELEGRAM_TOKEN") or os.getenv("BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID") or os.getenv("CHAT_ID")
@@ -68,12 +69,10 @@ def send_telegram(html_text: str):
 def update_lifecycle_and_track():
     print("🎯 Running Breakout Radar Tracker Engine...")
     if not os.path.exists(SIGNALS_CSV):
-        print("⚠️ signals.csv missing.")
         return
 
     signals_df = pd.read_csv(SIGNALS_CSV)
     if signals_df.empty:
-        print("ℹ️ signals.csv is empty.")
         return
 
     signals_df['Symbol_Clean'] = signals_df['Symbol'].astype(str).str.upper().str.strip()
@@ -82,26 +81,38 @@ def update_lifecycle_and_track():
     signals_df['Date_Parsed'] = pd.to_datetime(signals_df['Date'], dayfirst=True, errors='coerce')
     signals_df['Date_Norm'] = signals_df['Date_Parsed'].dt.strftime("%Y-%m-%d")
 
-    # Connect to DuckDB & pull the latest available session candles
+    # Connect to DuckDB - fetch latest available market session
     conn = duckdb.connect(DB_PATH)
     candles_df = conn.execute("""
         SELECT symbol AS Symbol, CAST(timestamp AS DATE) AS Date, high AS High, low AS Low, close AS Close
         FROM ohlcv_candles
         WHERE CAST(timestamp AS DATE) = (SELECT MAX(CAST(timestamp AS DATE)) FROM ohlcv_candles)
     """).df()
+    
+    # Get distinct available trading dates to calculate true trading session age
+    trading_dates_df = conn.execute("""
+        SELECT DISTINCT CAST(timestamp AS DATE) as d
+        FROM ohlcv_candles
+        ORDER BY d DESC
+        LIMIT 10
+    """).df()
     conn.close()
 
     if candles_df.empty:
-        # Fallback to signals date if DuckDB empty
-        latest_session_norm = signals_df['Date_Norm'].max()
-        latest_session_display = signals_df['Date_Parsed'].dt.strftime("%d-%m-%Y").max()
-        candle_dict = {}
-    else:
-        latest_session_norm = pd.to_datetime(candles_df['Date'].max()).strftime("%Y-%m-%d")
-        latest_session_display = pd.to_datetime(candles_df['Date'].max()).strftime("%d-%m-%Y")
-        candle_dict = candles_df.set_index("Symbol").to_dict("index")
+        return
 
-    # Load active watchlist
+    latest_session_dt = pd.to_datetime(candles_df['Date'].max())
+    latest_session_norm = latest_session_dt.strftime("%Y-%m-%d")
+    latest_session_display = latest_session_dt.strftime("%d-%m-%Y")
+    candle_dict = candles_df.set_index("Symbol").to_dict("index")
+
+    # Map trading days to calculate exact T-age
+    trading_days_list = [str(d) for d in trading_dates_df['d'].tolist()]
+    valid_window_dates = set(trading_days_list[:MAX_HOLD_DAYS + 1])  # Only T, T-1, T-2, T-3
+
+    # FILTER: ONLY INTAKE SIGNALS THAT ARE AT MOST 3 TRADING DAYS OLD
+    recent_signals_df = signals_df[signals_df['Date_Norm'].isin(valid_window_dates)].copy()
+
     wl_df = pd.DataFrame()
     if os.path.exists(ACTIVE_WATCHLIST_CSV):
         try:
@@ -116,16 +127,20 @@ def update_lifecycle_and_track():
     if not wl_df.empty and 'Date_Norm' in wl_df.columns:
         existing_keys = set(zip(wl_df['Date_Norm'].astype(str), wl_df['Symbol_Clean']))
 
-    # Intake new signals
     new_items = []
-    for _, row in signals_df.iterrows():
+    for _, row in recent_signals_df.iterrows():
         key = (str(row['Date_Norm']), row['Symbol_Clean'])
         if key not in existing_keys:
-            is_today = (str(row['Date_Norm']) == latest_session_norm)
+            sig_date_str = str(row['Date_Norm'])
+            # Calculate actual session age
+            age = 1
+            if sig_date_str in trading_days_list:
+                age = max(1, trading_days_list.index(sig_date_str))
+
             direction = "SHORT" if "BEARISH" in str(row.get('Pattern', '')).upper() or str(row.get('Type', '')).upper() == "SHORT" else "LONG"
             new_items.append({
                 "Date": row['Date'],
-                "Date_Norm": str(row['Date_Norm']),
+                "Date_Norm": sig_date_str,
                 "Symbol": row['Symbol_Clean'],
                 "Type": direction,
                 "Entry": float(row['Entry']),
@@ -133,14 +148,14 @@ def update_lifecycle_and_track():
                 "Target": float(row['Target']),
                 "Close": float(row['Close']),
                 "Status": "PENDING",
-                "Days_Active": 1 if is_today else 2,
+                "Days_Active": age,
                 "Trigger_Date": ""
             })
 
     if new_items:
         wl_df = pd.concat([wl_df, pd.DataFrame(new_items)], ignore_index=True)
 
-    # Evaluate lifecycle states
+    # State Machine Evaluation
     updated = []
     for _, row in wl_df.iterrows():
         sym = row['Symbol']
@@ -156,14 +171,14 @@ def update_lifecycle_and_track():
             updated.append(row.to_dict())
             continue
 
-        # Day 0 setups stay PENDING
+        # Day 0 setups (generated today) cannot be triggered today
         if sig_date_norm == latest_session_norm:
             row['Status'] = "PENDING"
             row['Days_Active'] = 1
             updated.append(row.to_dict())
             continue
 
-        # Day 1+ setups: evaluate against today's actual candle
+        # For setups from previous trading days, evaluate against today's prices
         if sym in candle_dict:
             c = candle_dict[sym]
             hi, lo = float(c['High']), float(c['Low'])
@@ -207,9 +222,11 @@ def update_lifecycle_and_track():
         updated.append(row.to_dict())
 
     final_wl = pd.DataFrame(updated)
+    
+    # Prune expired/stopped-out rows older than 5 days so the active table stays fresh
     os.makedirs("data", exist_ok=True)
     final_wl.to_csv(ACTIVE_WATCHLIST_CSV, index=False)
-    print(f"💾 Updated active_watchlist.csv ({len(final_wl)} setups tracked)")
+    print(f"💾 Clean Watchlist: {len(final_wl)} active/pending setups.")
 
     send_telegram_radar_table(final_wl, latest_session_display)
 
@@ -227,7 +244,6 @@ def send_telegram_radar_table(df: pd.DataFrame, date_str: str):
         "━━━━━━━━━━━━━━━━━━━━\n"
     ]
 
-    # SECTION 1: Active Triggered Positions
     msg_lines.append(f"🚀 <b>TRIGGERED POSITIONS ({len(triggered)})</b>")
     if not triggered.empty:
         t_header = f"{'Symbol':<9} {'Bias':<5} {'Entry':<8} {'SL':<8} {'Tgt':<8}"
@@ -244,7 +260,6 @@ def send_telegram_radar_table(df: pd.DataFrame, date_str: str):
     else:
         msg_lines.append("<i>No active positions triggered today.</i>\n")
 
-    # SECTION 2: Pending Breakout Watchlist
     msg_lines.append(f"⏳ <b>WAITING FOR TRIGGER ({len(pending)})</b>")
     if not pending.empty:
         p_header = f"{'Symbol':<9} {'Bias':<5} {'Age':<4} {'Level':<8} {'SL':<8}"
