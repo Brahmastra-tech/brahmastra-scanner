@@ -4,8 +4,11 @@ import duckdb
 import pandas as pd
 import numpy as np
 import requests
-from datetime import datetime, timedelta
+from datetime import datetime
 
+# ==========================================
+# CONFIGURATION & CANONICAL F&O UNIVERSE
+# ==========================================
 DB_PATH = "data/candles.duckdb"
 SIGNALS_CSV = "data/signals.csv"
 ACTIVE_WATCHLIST_CSV = "data/active_watchlist.csv"
@@ -14,6 +17,11 @@ MAX_HOLD_DAYS = 3  # T+3 Expiry Rule
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN") or os.getenv("TELEGRAM_TOKEN") or os.getenv("BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID") or os.getenv("CHAT_ID")
 DASHBOARD_URL = "https://brahmastra-tech.github.io/brahmastra-scanner/"
+
+SCHEMA_COLUMNS = [
+    "Date", "Date_Norm", "Symbol", "Type", "Entry", 
+    "SL", "Target", "Close", "Status", "Days_Active", "Trigger_Date"
+]
 
 NSE_FO_SYMBOLS = frozenset({
     "AARTIIND", "ABB", "ABBOTINDIA", "ABCAPITAL", "ABFRL", "ACC", "ADANIENT",
@@ -69,10 +77,12 @@ def send_telegram(html_text: str):
 def update_lifecycle_and_track():
     print("🎯 Running Breakout Radar Tracker Engine...")
     if not os.path.exists(SIGNALS_CSV):
+        print("⚠️ signals.csv missing.")
         return
 
     signals_df = pd.read_csv(SIGNALS_CSV)
     if signals_df.empty:
+        print("ℹ️ signals.csv is empty.")
         return
 
     signals_df['Symbol_Clean'] = signals_df['Symbol'].astype(str).str.upper().str.strip()
@@ -88,8 +98,7 @@ def update_lifecycle_and_track():
         FROM ohlcv_candles
         WHERE CAST(timestamp AS DATE) = (SELECT MAX(CAST(timestamp AS DATE)) FROM ohlcv_candles)
     """).df()
-    
-    # Get distinct available trading dates to calculate true trading session age
+
     trading_dates_df = conn.execute("""
         SELECT DISTINCT CAST(timestamp AS DATE) as d
         FROM ohlcv_candles
@@ -99,6 +108,7 @@ def update_lifecycle_and_track():
     conn.close()
 
     if candles_df.empty:
+        print("⚠️ DuckDB candles empty.")
         return
 
     latest_session_dt = pd.to_datetime(candles_df['Date'].max())
@@ -106,25 +116,31 @@ def update_lifecycle_and_track():
     latest_session_display = latest_session_dt.strftime("%d-%m-%Y")
     candle_dict = candles_df.set_index("Symbol").to_dict("index")
 
-    # Map trading days to calculate exact T-age
-    trading_days_list = [str(d) for d in trading_dates_df['d'].tolist()]
-    valid_window_dates = set(trading_days_list[:MAX_HOLD_DAYS + 1])  # Only T, T-1, T-2, T-3
+    # Trading days list as normalized YYYY-MM-DD strings
+    trading_days_list = [pd.to_datetime(d).strftime("%Y-%m-%d") for d in trading_dates_df['d'].tolist()]
+    valid_window_dates = set(trading_days_list[:MAX_HOLD_DAYS + 1])
 
-    # FILTER: ONLY INTAKE SIGNALS THAT ARE AT MOST 3 TRADING DAYS OLD
+    # If signals.csv has dates newer than DuckDB, include them as active
+    all_sig_dates = sorted(signals_df['Date_Norm'].dropna().unique(), reverse=True)
+    for d in all_sig_dates[:MAX_HOLD_DAYS + 1]:
+        valid_window_dates.add(d)
+
+    # Filter signals within the active T+3 window
     recent_signals_df = signals_df[signals_df['Date_Norm'].isin(valid_window_dates)].copy()
 
-    wl_df = pd.DataFrame()
+    wl_df = pd.DataFrame(columns=SCHEMA_COLUMNS)
     if os.path.exists(ACTIVE_WATCHLIST_CSV):
         try:
-            wl_df = pd.read_csv(ACTIVE_WATCHLIST_CSV)
-            if not wl_df.empty and 'Symbol' in wl_df.columns:
-                wl_df['Symbol_Clean'] = wl_df['Symbol'].astype(str).str.upper().str.strip()
-                wl_df = wl_df[wl_df['Symbol_Clean'].isin(NSE_FO_SYMBOLS)].copy()
+            temp_df = pd.read_csv(ACTIVE_WATCHLIST_CSV)
+            if not temp_df.empty and 'Symbol' in temp_df.columns:
+                temp_df['Symbol_Clean'] = temp_df['Symbol'].astype(str).str.upper().str.strip()
+                temp_df = temp_df[temp_df['Symbol_Clean'].isin(NSE_FO_SYMBOLS)].copy()
+                wl_df = temp_df
         except Exception:
-            wl_df = pd.DataFrame()
+            wl_df = pd.DataFrame(columns=SCHEMA_COLUMNS)
 
     existing_keys = set()
-    if not wl_df.empty and 'Date_Norm' in wl_df.columns:
+    if not wl_df.empty and 'Date_Norm' in wl_df.columns and 'Symbol_Clean' in wl_df.columns:
         existing_keys = set(zip(wl_df['Date_Norm'].astype(str), wl_df['Symbol_Clean']))
 
     new_items = []
@@ -132,7 +148,6 @@ def update_lifecycle_and_track():
         key = (str(row['Date_Norm']), row['Symbol_Clean'])
         if key not in existing_keys:
             sig_date_str = str(row['Date_Norm'])
-            # Calculate actual session age
             age = 1
             if sig_date_str in trading_days_list:
                 age = max(1, trading_days_list.index(sig_date_str))
@@ -155,11 +170,15 @@ def update_lifecycle_and_track():
     if new_items:
         wl_df = pd.concat([wl_df, pd.DataFrame(new_items)], ignore_index=True)
 
-    # State Machine Evaluation
+    # Ensure all schema columns exist before iteration
+    for col in SCHEMA_COLUMNS:
+        if col not in wl_df.columns:
+            wl_df[col] = "" if col in ["Trigger_Date", "Date", "Date_Norm", "Symbol", "Type", "Status"] else 0.0
+
     updated = []
     for _, row in wl_df.iterrows():
         sym = row['Symbol']
-        status = row['Status']
+        status = str(row.get('Status', 'PENDING'))
         sig_date_norm = str(row.get('Date_Norm', ''))
         sig_type = str(row.get('Type', 'LONG')).upper()
         entry = float(row['Entry'])
@@ -171,14 +190,14 @@ def update_lifecycle_and_track():
             updated.append(row.to_dict())
             continue
 
-        # Day 0 setups (generated today) cannot be triggered today
+        # Day 0 setups stay PENDING
         if sig_date_norm == latest_session_norm:
             row['Status'] = "PENDING"
             row['Days_Active'] = 1
             updated.append(row.to_dict())
             continue
 
-        # For setups from previous trading days, evaluate against today's prices
+        # Evaluate against current session candles
         if sym in candle_dict:
             c = candle_dict[sym]
             hi, lo = float(c['High']), float(c['Low'])
@@ -221,9 +240,8 @@ def update_lifecycle_and_track():
 
         updated.append(row.to_dict())
 
-    final_wl = pd.DataFrame(updated)
+    final_wl = pd.DataFrame(updated) if updated else pd.DataFrame(columns=SCHEMA_COLUMNS)
     
-    # Prune expired/stopped-out rows older than 5 days so the active table stays fresh
     os.makedirs("data", exist_ok=True)
     final_wl.to_csv(ACTIVE_WATCHLIST_CSV, index=False)
     print(f"💾 Clean Watchlist: {len(final_wl)} active/pending setups.")
@@ -235,8 +253,8 @@ def send_telegram_radar_table(df: pd.DataFrame, date_str: str):
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
         return
 
-    triggered = df[df["Status"] == "TRIGGERED"]
-    pending = df[df["Status"] == "PENDING"]
+    triggered = df[df["Status"] == "TRIGGERED"] if "Status" in df.columns and not df.empty else pd.DataFrame()
+    pending = df[df["Status"] == "PENDING"] if "Status" in df.columns and not df.empty else pd.DataFrame()
 
     msg_lines = [
         "🏛️ <b>BRAHMASTRA ORDER FLOW RADAR</b>",
@@ -244,6 +262,7 @@ def send_telegram_radar_table(df: pd.DataFrame, date_str: str):
         "━━━━━━━━━━━━━━━━━━━━\n"
     ]
 
+    # SECTION 1: Active Triggered Positions
     msg_lines.append(f"🚀 <b>TRIGGERED POSITIONS ({len(triggered)})</b>")
     if not triggered.empty:
         t_header = f"{'Symbol':<9} {'Bias':<5} {'Entry':<8} {'SL':<8} {'Tgt':<8}"
@@ -260,6 +279,7 @@ def send_telegram_radar_table(df: pd.DataFrame, date_str: str):
     else:
         msg_lines.append("<i>No active positions triggered today.</i>\n")
 
+    # SECTION 2: Pending Breakout Watchlist
     msg_lines.append(f"⏳ <b>WAITING FOR TRIGGER ({len(pending)})</b>")
     if not pending.empty:
         p_header = f"{'Symbol':<9} {'Bias':<5} {'Age':<4} {'Level':<8} {'SL':<8}"
