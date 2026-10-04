@@ -1,20 +1,13 @@
 import os
-import re
-import io
 import time
 import duckdb
 import pandas as pd
 import numpy as np
 import requests
-from datetime import datetime
 
-# ==========================================
-# CONFIGURATION & CONSTANTS
-# ==========================================
 DB_PATH = "data/candles.duckdb"
 SIGNALS_CSV = "data/signals.csv"
 
-# Local file path provided by user + fallback for GitHub Actions
 LOCAL_CSV_PATH = r"D:\Scanner\fo_mktlots.csv"
 REPO_CSV_PATH = "fo_mktlots.csv"
 
@@ -24,7 +17,7 @@ LOCAL_LIQ_PERIOD = 10
 HTF_PERIOD = 20
 
 MIN_PRICE = 100.0
-RR_RATIO = 2.0  # Strict 1:2 Risk to Reward
+RR_RATIO = 2.0
 
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN") or os.getenv("TELEGRAM_TOKEN") or os.getenv("BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID") or os.getenv("CHAT_ID")
@@ -32,57 +25,22 @@ DASHBOARD_URL = "https://brahmastra-tech.github.io/brahmastra-scanner/"
 
 
 def load_fo_universe() -> frozenset:
-    """Reads stock universe dynamically from D:\Scanner\fo_mktlots.csv"""
     file_path = LOCAL_CSV_PATH if os.path.exists(LOCAL_CSV_PATH) else REPO_CSV_PATH
-
     if os.path.exists(file_path):
         try:
             df = pd.read_csv(file_path, skipinitialspace=True)
-            # Find the symbol column dynamically
             sym_col = next((c for c in df.columns if 'SYMBOL' in c.upper()), None)
             if sym_col:
                 raw_symbols = df[sym_col].dropna().astype(str).str.strip().str.upper().unique()
-                # Exclude benchmark indices
                 cleaned = {s for s in raw_symbols if s and not any(idx in s for idx in ["NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY"])}
                 print(f"✅ Loaded {len(cleaned)} F&O stocks from {file_path}")
                 return frozenset(cleaned)
         except Exception as e:
             print(f"⚠️ Error reading {file_path}: {e}")
-
-    print("⚠️ fo_mktlots.csv not found at local or repo path. Using default fallback universe.")
-    # Safe fallback if file is missing in cloud runner
-    return frozenset({
-        "AARTIIND", "ABB", "ABBOTINDIA", "ABCAPITAL", "ABFRL", "ACC", "ADANIENT",
-        "ADANIPORTS", "ALKEM", "AMBUJACEM", "APOLLOHOSP", "APOLLOTYRE", "ASHOKLEY",
-        "ASIANPAINT", "ASTRAL", "ATUL", "AUBANK", "AUROPHARMA", "AXISBANK", "BAJAJ-AUTO",
-        "BAJAJFINSV", "BAJFINANCE", "BALKRISIND", "BALRAMCHIN", "BANDHANBNK", "BANKBARODA",
-        "BATAINDIA", "BEL", "BERGEPAINT", "BHARATFORG", "BHARTIARTL", "BHEL", "BIOCON",
-        "BOSCHLTD", "BPCL", "BRITANNIA", "BSOFT", "CANBK", "CANFINHOME", "CHAMBLFERT",
-        "CHOLAFIN", "CIPLA", "COALINDIA", "COFORGE", "COLPAL", "CONCOR", "COROMANDEL",
-        "CROMPTON", "CUB", "CUMMINSIND", "DABUR", "DALBHARAT", "DEEPAKNTR", "DIVISLAB",
-        "DIXON", "DLF", "DRREDDY", "EICHERMOT", "ESCORTS", "EXIDEIND", "FEDERALBNK",
-        "GAIL", "GLENMARK", "GMRINFRA", "GNFC", "GODREJCP", "GODREJPROP", "GRANULES",
-        "GRASIM", "GUJGASLTD", "HAL", "HAVELLS", "HCLTECH", "HDFCAMC", "HDFCBANK",
-        "HDFCLIFE", "HEROMOTOCO", "HINDALCO", "HINDPETRO", "HINDUNILVR", "ICICIBANK",
-        "ICICIGI", "ICICIPRULI", "IDEA", "IDFC", "IDFCFIRSTB", "IEX", "IGL", "INDHOTEL",
-        "INDIACEM", "INDIAMART", "INDIGO", "INDUSINDBK", "INDUSTOWER", "INFY", "IOC",
-        "IPCALAB", "IRCTC", "ITC", "JINDALSTEL", "JKCEMENT", "JSWSTEEL", "JUBLFOOD",
-        "KOTAKBANK", "LALPATHLAB", "LAURUSLABS", "LICHSGFIN", "LT", "LTIM", "LTTS",
-        "LUPIN", "M&M", "M&MFIN", "MANAPPURAM", "MARICO", "MARUTI", "MCDOWELL-N",
-        "MCX", "METROPOLIS", "MFSL", "MGL", "MOTHERSON", "MPHASIS", "MRF", "MUTHOOTFIN",
-        "NATIONALUM", "NAUKRI", "NAVINFLUOR", "NESTLEIND", "NMDC", "NTPC", "OBEROIRLTY",
-        "OFSS", "ONGC", "PAGEIND", "PEL", "PERSISTENT", "PETRONET", "PFC", "PIDILITIND",
-        "PIIND", "PNB", "POLYCAB", "POONAWALLA", "POWERGRID", "PVRINOX", "RAMCOCEM",
-        "RBLBANK", "RECLTD", "RELIANCE", "SAIL", "SBICARD", "SBILIFE", "SBIN", "SHREECEM",
-        "SHRIRAMFIN", "SIEMENS", "SRF", "SUNPHARMA", "SUNTV", "SYNGENE", "TATACHEM",
-        "TATACOMM", "TATACONSUM", "TATAMOTORS", "TATAPOWER", "TATASTEEL", "TCS", "TECHM",
-        "TITAN", "TORNTPHARM", "TRENT", "TVSMOTOR", "UBL", "ULTRACEMCO", "UPL", "VEDL",
-        "VOLTAS", "WIPRO", "ZEEL"
-    })
+    return frozenset()
 
 
 def compute_indicators(df: pd.DataFrame) -> pd.DataFrame:
-    """Calculates ATR(14), RVOL(20), Local Liquidity (10), and HTF (20) levels."""
     high = df['High']
     low = df['Low']
     close = df['Close']
@@ -95,36 +53,32 @@ def compute_indicators(df: pd.DataFrame) -> pd.DataFrame:
     tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
     df['ATR'] = tr.ewm(alpha=1/ATR_PERIOD, min_periods=ATR_PERIOD, adjust=False).mean()
 
-    # 2. RVOL (Volume / SMA(20))
-    vol_sma20 = df['Volume'].rolling(window=RVOL_PERIOD, min_periods=10).mean()
+    # 2. RVOL (Volume / 20-day SMA)
+    vol_sma20 = df['Volume'].rolling(window=RVOL_PERIOD, min_periods=5).mean()
     df['RVOL'] = (df['Volume'] / (vol_sma20 + 1e-5)).round(2)
 
-    # 3. Local Liquidity (Previous 10 sessions excluding current candle)
+    # 3. 10-Day Local Liquidity (Shifted by 1 so current bar is not counted)
     df['prior_low'] = low.shift(1).rolling(window=LOCAL_LIQ_PERIOD, min_periods=LOCAL_LIQ_PERIOD).min()
     df['prior_high'] = high.shift(1).rolling(window=LOCAL_LIQ_PERIOD, min_periods=LOCAL_LIQ_PERIOD).max()
 
-    # 4. HTF Structure Levels (Previous 20 sessions excluding current candle)
+    # 4. 20-Day HTF Structure
     df['major_demand'] = low.shift(1).rolling(window=HTF_PERIOD, min_periods=HTF_PERIOD).min()
     df['major_supply'] = high.shift(1).rolling(window=HTF_PERIOD, min_periods=HTF_PERIOD).max()
 
     return df
 
 
-def run_liquidity_sweep_scanner():
-    print("🚀 Initializing Institutional Liquidity Sweep & Displacement Scanner (Daily)...")
-    
+def run_scanner():
+    print("🚀 Running Daily Liquidity Sweep & Displacement Scanner...")
     if not os.path.exists(DB_PATH):
-        print(f"❌ Database not found at {DB_PATH}")
+        print("❌ candles.duckdb not found.")
         return
-
-    universe = load_fo_universe()
 
     conn = duckdb.connect(DB_PATH)
     cols = [c[0].lower() for c in conn.execute("DESCRIBE ohlcv_candles").fetchall()]
     
     select_parts = [
-        "symbol AS Symbol",
-        "CAST(timestamp AS DATE) AS Date",
+        "symbol AS Symbol", "CAST(timestamp AS DATE) AS Date",
         "open AS Open", "high AS High", "low AS Low", "close AS Close", "volume AS Volume"
     ]
     if "delivery_pct" in cols:
@@ -136,24 +90,17 @@ def run_liquidity_sweep_scanner():
     if "series" in cols:
         where_parts.append("UPPER(series) = 'EQ'")
 
-    df_raw = conn.execute(f"""
-        SELECT {', '.join(select_parts)}
-        FROM ohlcv_candles
-        WHERE {' AND '.join(where_parts)}
-        ORDER BY symbol, timestamp ASC
-    """).df()
+    df_raw = conn.execute(f"SELECT {', '.join(select_parts)} FROM ohlcv_candles WHERE {' AND '.join(where_parts)} ORDER BY symbol, timestamp ASC").df()
     conn.close()
 
     if df_raw.empty:
-        print("⚠️ No candle records found.")
         return
 
-    df_raw["Symbol_Clean"] = (
-        df_raw["Symbol"].astype(str).str.upper().str.strip()
-        .str.replace(r"-EQ$", "", regex=True)
-        .str.replace(r"\.EQ$", "", regex=True)
-    )
-    df_raw = df_raw[df_raw["Symbol_Clean"].isin(universe)].copy()
+    universe = load_fo_universe()
+    df_raw["Symbol_Clean"] = df_raw["Symbol"].astype(str).str.upper().str.strip().str.replace(r"-EQ$", "", regex=True)
+    if universe:
+        df_raw = df_raw[df_raw["Symbol_Clean"].isin(universe)].copy()
+
     df_raw["Date_DT"] = pd.to_datetime(df_raw["Date"])
     latest_date_str = df_raw["Date_DT"].max().strftime("%d-%m-%Y")
 
@@ -164,7 +111,6 @@ def run_liquidity_sweep_scanner():
             continue
 
         df = compute_indicators(df_sym.copy().sort_values("Date_DT").reset_index(drop=True))
-        
         curr = df.iloc[-1]
         prev = df.iloc[-2]
 
@@ -179,30 +125,27 @@ def run_liquidity_sweep_scanner():
         major_supply = curr['major_supply']
         major_demand = curr['major_demand']
 
-        if pd.isna(atr) or pd.isna(prior_low) or pd.isna(major_supply) or rvol < 1.15:
+        if pd.isna(atr) or pd.isna(prior_low) or pd.isna(major_supply):
             continue
 
-        # ==========================================================
-        # STEP 2: BUY SETUP (Liquidity Sweep + BOS / Displacement)
-        # ==========================================================
-        # 1. Sweep & Reclaim
+        # Volume threshold: at least 1.0x (average volume) or spike >= 1.15x
+        vol_confirmed = rvol >= 1.05
+
+        # ----------------------------------------------------
+        # 1. DAILY BUY SETUP (Sweep 10-day low + Bullish Reclaim)
+        # ----------------------------------------------------
         sweep_buy = (l < prior_low) and (c > prior_low)
         lower_wick = min(o, c) - l
-        rejection_buy = (c > o) and (lower_wick >= (body * 0.40))
+        # Rejection: lower wick should show buying tail (at least 20% of range or 30% of body)
+        rejection_buy = (c > o) and ((lower_wick >= body * 0.30) or (lower_wick >= c_range * 0.20))
+        # Daily displacement: close in upper 40% of range
+        close_strong_buy = c >= (h - (c_range * 0.40))
+        supply_safe_buy = (c >= major_supply) or ((major_supply - c) >= (1.0 * atr))
 
-        # 2. Displacement
-        body_disp_buy = body >= (atr * 0.65)
-        prev_break_buy = c > prev['High']
-        close_extreme_buy = c >= (h - (c_range * 0.25))
-
-        # 3. Supply / Anti-Trap Filter
-        supply_safe_buy = (c >= major_supply) or ((major_supply - c) >= (1.5 * atr))
-
-        if sweep_buy and rejection_buy and body_disp_buy and prev_break_buy and close_extreme_buy and supply_safe_buy:
+        if sweep_buy and rejection_buy and close_strong_buy and vol_confirmed and supply_safe_buy:
             sl = round(l - (1.0 * atr), 2)
             risk = max(c - sl, c * 0.005)
             target = round(c + (risk * RR_RATIO), 2)
-            deliv_pct = round(float(curr.get('DeliveryPct', 0.0)), 1)
 
             signals.append({
                 "Date": latest_date_str,
@@ -214,32 +157,24 @@ def run_liquidity_sweep_scanner():
                 "Target": target,
                 "Close": round(c, 2),
                 "Volume": int(curr['Volume']),
-                "DeliveryPct": deliv_pct,
+                "DeliveryPct": round(float(curr.get('DeliveryPct', 0.0)), 1),
                 "DelivSpikeRatio": round(rvol, 2),
                 "ATR": round(atr, 2)
             })
 
-        # ==========================================================
-        # STEP 3: SELL SETUP (Liquidity Grab + Bearish Displacement)
-        # ==========================================================
-        # 1. Grab & Reclaim
+        # ----------------------------------------------------
+        # 2. DAILY SELL SETUP (Grab 10-day high + Bearish Rejection)
+        # ----------------------------------------------------
         grab_sell = (h > prior_high) and (c < prior_high)
         upper_wick = h - max(o, c)
-        rejection_sell = (c < o) and (upper_wick >= (body * 0.40))
+        rejection_sell = (c < o) and ((upper_wick >= body * 0.30) or (upper_wick >= c_range * 0.20))
+        close_weak_sell = c <= (l + (c_range * 0.40))
+        demand_safe_sell = (c <= major_demand) or ((c - major_demand) >= (1.0 * atr))
 
-        # 2. Displacement
-        body_disp_sell = body >= (atr * 0.65)
-        prev_break_sell = c < prev['Low']
-        close_extreme_sell = c <= (l + (c_range * 0.25))
-
-        # 3. Demand / Anti-Trap Filter
-        demand_safe_sell = (c <= major_demand) or ((c - major_demand) >= (1.5 * atr))
-
-        if grab_sell and rejection_sell and body_disp_sell and prev_break_sell and close_extreme_sell and demand_safe_sell:
+        if grab_sell and rejection_sell and close_weak_sell and vol_confirmed and demand_safe_sell:
             sl = round(h + (1.0 * atr), 2)
             risk = max(sl - c, c * 0.005)
             target = round(c - (risk * RR_RATIO), 2)
-            deliv_pct = round(float(curr.get('DeliveryPct', 0.0)), 1)
 
             signals.append({
                 "Date": latest_date_str,
@@ -251,7 +186,7 @@ def run_liquidity_sweep_scanner():
                 "Target": target,
                 "Close": round(c, 2),
                 "Volume": int(curr['Volume']),
-                "DeliveryPct": deliv_pct,
+                "DeliveryPct": round(float(curr.get('DeliveryPct', 0.0)), 1),
                 "DelivSpikeRatio": round(rvol, 2),
                 "ATR": round(atr, 2)
             })
@@ -282,9 +217,9 @@ def run_liquidity_sweep_scanner():
         combined = pd.DataFrame(columns=clean_cols)
 
     combined.to_csv(SIGNALS_CSV, index=False)
-    print(f"✅ Scanning Complete: {len(today_df)} Institutional setups detected for {latest_date_str}.")
+    print(f"✅ Generated {len(today_df)} Daily Liquidity Setups for {latest_date_str}.")
 
-    # Dispatch alerts
+    # Dispatch to Telegram
     records = today_df.to_dict('records') if not today_df.empty else []
     try:
         for item in records:
@@ -297,44 +232,31 @@ def run_liquidity_sweep_scanner():
 def send_telegram_alert(sig: dict):
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
         return
-
-    sym = sig['Symbol']
-    stype = sig['Type']
-    entry = sig['Entry']
-    sl = sig['SL']
-    target = sig['Target']
-    rvol = sig['DelivSpikeRatio']
-    atr = sig['ATR']
-    date = sig['Date']
-
+    sym, stype, entry, sl, target = sig['Symbol'], sig['Type'], sig['Entry'], sig['SL'], sig['Target']
+    rvol, atr, date = sig['DelivSpikeRatio'], sig['ATR'], sig['Date']
     is_buy = stype == "LONG"
-    header = "🟢 <b>INSTITUTIONAL LIQUIDITY SWEEP (BUY)</b>" if is_buy else "🔴 <b>INSTITUTIONAL LIQUIDITY GRAB (SELL)</b>"
-    action = "Execute BUY at CMP" if is_buy else "Execute SHORT at CMP"
+    header = "🟢 <b>DAILY LIQUIDITY SWEEP (BUY)</b>" if is_buy else "🔴 <b>DAILY LIQUIDITY GRAB (SHORT)</b>"
+    action = "Buy at Close" if is_buy else "Sell at Close"
     chart_url = f"https://in.tradingview.com/chart/?symbol=NSE:{sym}"
 
     msg = (
         f"{header}\n"
         f"━━━━━━━━━━━━━━━━━━━━\n"
-        f"📈 <b>Stock:</b> {sym} (NSE F&O EQ)\n"
-        f"⏱ <b>Timeframe:</b> Daily | <b>Date:</b> {date}\n"
+        f"📈 <b>Stock:</b> {sym} (NSE F&O)\n"
+        f"⏱ <b>Date:</b> {date} | <b>Timeframe:</b> Daily\n"
         f"⚡ <b>RVOL:</b> {rvol:.2f}x | <b>ATR(14):</b> ₹{atr:.2f}\n\n"
-        f"📊 <b>TRADE PARAMETERS (1:2 R:R)</b>\n"
-        f"• <b>Action Entry  :</b> ₹{entry:.2f} ({action})\n"
-        f"• <b>Stop Loss (SL):</b> ₹{sl:.2f} (1.0x ATR buffer)\n"
-        f"• <b>Target (TP)   :</b> ₹{target:.2f} (Strict 1:2)\n\n"
-        f"🛡️ <b>STRUCTURE FILTER</b>\n"
-        f"• Local 10-Day Liquidity Reclaimed: ✅\n"
-        f"• 1.5x ATR Runway to HTF Structure: ✅\n"
+        f"📊 <b>TRADE LEVELS (1:2 R:R)</b>\n"
+        f"• <b>Entry :</b> ₹{entry:.2f} ({action})\n"
+        f"• <b>SL    :</b> ₹{sl:.2f} (1.0x ATR buffer)\n"
+        f"• <b>Target:</b> ₹{target:.2f} (1:2)\n\n"
+        f"🛡️ <b>CONFIRMATIONS</b>\n"
+        f"• 10-Day Liquidity Swept & Reclaimed: ✅\n"
+        f"• Supply/Demand Runway Clear: ✅\n"
         f"━━━━━━━━━━━━━━━━━━━━\n"
-        f"📈 <a href='{chart_url}'>Open TradingView Chart</a>"
+        f"📈 <a href='{chart_url}'>View {sym} Chart</a>"
     )
-
     try:
-        requests.post(
-            f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
-            json={"chat_id": TELEGRAM_CHAT_ID, "text": msg, "parse_mode": "HTML"},
-            timeout=10
-        )
+        requests.post(f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage", json={"chat_id": TELEGRAM_CHAT_ID, "text": msg, "parse_mode": "HTML"}, timeout=10)
     except Exception:
         pass
 
@@ -342,29 +264,21 @@ def send_telegram_alert(sig: dict):
 def send_summary_telegram(records: list, date_str: str):
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
         return
-
     buys = sum(1 for r in records if r['Type'] == "LONG")
     sells = sum(1 for r in records if r['Type'] == "SHORT")
-
     msg = (
-        f"🏁 <b>DAILY LIQUIDITY SCAN COMPLETE ({date_str})</b>\n"
+        f"🏁 <b>DAILY LIQUIDITY SWEEP SCAN COMPLETE ({date_str})</b>\n"
         f"━━━━━━━━━━━━━━━━━━━━\n"
         f"📊 <b>Total Setups Triggered:</b> {len(records)}\n"
         f"🟢 <b>Buy Sweeps:</b> {buys}  |  🔴 <b>Sell Grabs:</b> {sells}\n"
-        f"🏛️ <b>Rules:</b> 10D Sweep + Reclaim + 0.65x ATR Body + RVOL ≥ 1.15x\n"
         f"🌐 <a href='{DASHBOARD_URL}'>Open Terminal Dashboard</a>\n"
         f"━━━━━━━━━━━━━━━━━━━━"
     )
-
     try:
-        requests.post(
-            f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
-            json={"chat_id": TELEGRAM_CHAT_ID, "text": msg, "parse_mode": "HTML"},
-            timeout=10
-        )
+        requests.post(f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage", json={"chat_id": TELEGRAM_CHAT_ID, "text": msg, "parse_mode": "HTML"}, timeout=10)
     except Exception:
         pass
 
 
 if __name__ == "__main__":
-    run_liquidity_sweep_scanner()
+    run_scanner()
