@@ -29,63 +29,67 @@ TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN") or os.getenv("TELEGRAM_TOKE
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID") or os.getenv("CHAT_ID")
 DASHBOARD_URL = "https://brahmastra-tech.github.io/brahmastra-scanner/"
 
+# Canonical 210 NSE F&O Universe (Ensures non-F&O/ETFs like MOM50 are completely blocked)
+CANONICAL_NSE_FO = frozenset({
+    "AARTIIND", "ABB", "ABBOTINDIA", "ABCAPITAL", "ABFRL", "ACC", "ADANIENT",
+    "ADANIPORTS", "ALKEM", "AMBUJACEM", "APOLLOHOSP", "APOLLOTYRE", "ASHOKLEY",
+    "ASIANPAINT", "ASTRAL", "ATUL", "AUBANK", "AUROPHARMA", "AXISBANK", "BAJAJ-AUTO",
+    "BAJAJFINSV", "BAJFINANCE", "BALKRISIND", "BALRAMCHIN", "BANDHANBNK", "BANKBARODA",
+    "BATAINDIA", "BEL", "BERGEPAINT", "BHARATFORG", "BHARTIARTL", "BHEL", "BIOCON",
+    "BOSCHLTD", "BPCL", "BRITANNIA", "BSOFT", "CANBK", "CANFINHOME", "CHAMBLFERT",
+    "CHOLAFIN", "CIPLA", "COALINDIA", "COFORGE", "COLPAL", "CONCOR", "COROMANDEL",
+    "CROMPTON", "CUB", "CUMMINSIND", "DABUR", "DALBHARAT", "DEEPAKNTR", "DIVISLAB",
+    "DIXON", "DLF", "DRREDDY", "EICHERMOT", "ESCORTS", "EXIDEIND", "FEDERALBNK",
+    "GAIL", "GLENMARK", "GMRINFRA", "GNFC", "GODREJCP", "GODREJPROP", "GRANULES",
+    "GRASIM", "GUJGASLTD", "HAL", "HAVELLS", "HCLTECH", "HDFCAMC", "HDFCBANK",
+    "HDFCLIFE", "HEROMOTOCO", "HINDALCO", "HINDPETRO", "HINDUNILVR", "ICICIBANK",
+    "ICICIGI", "ICICIPRULI", "IDEA", "IDFC", "IDFCFIRSTB", "IEX", "IGL", "INDHOTEL",
+    "INDIACEM", "INDIAMART", "INDIGO", "INDUSINDBK", "INDUSTOWER", "INFY", "IOC",
+    "IPCALAB", "IRCTC", "ITC", "JINDALSTEL", "JKCEMENT", "JSWSTEEL", "JUBLFOOD",
+    "KOTAKBANK", "LALPATHLAB", "LAURUSLABS", "LICHSGFIN", "LT", "LTIM", "LTTS",
+    "LUPIN", "M&M", "M&MFIN", "MANAPPURAM", "MARICO", "MARUTI", "MCDOWELL-N",
+    "MCX", "METROPOLIS", "MFSL", "MGL", "MOTHERSON", "MPHASIS", "MRF", "MUTHOOTFIN",
+    "NATIONALUM", "NAUKRI", "NAVINFLUOR", "NESTLEIND", "NMDC", "NTPC", "OBEROIRLTY",
+    "OFSS", "ONGC", "PAGEIND", "PEL", "PERSISTENT", "PETRONET", "PFC", "PIDILITIND",
+    "PIIND", "PNB", "POLYCAB", "POONAWALLA", "POWERGRID", "PVRINOX", "RAMCOCEM",
+    "RBLBANK", "RECLTD", "RELIANCE", "SAIL", "SBICARD", "SBILIFE", "SBIN", "SHREECEM",
+    "SHRIRAMFIN", "SIEMENS", "SRF", "SUNPHARMA", "SUNTV", "SYNGENE", "TATACHEM",
+    "TATACOMM", "TATACONSUM", "TATAMOTORS", "TATAPOWER", "TATASTEEL", "TCS", "TECHM",
+    "TITAN", "TORNTPHARM", "TRENT", "TVSMOTOR", "UBL", "ULTRACEMCO", "UPL", "VEDL",
+    "VOLTAS", "WIPRO", "ZEEL"
+})
+
 
 def load_fo_universe() -> frozenset:
-    """Robust extractor for NSE fo_mktlots.csv that captures all 210+ equity symbols."""
+    """Reads D:\Scanner\fo_mktlots.csv or repo copy with strict equity F&O validation."""
     file_path = LOCAL_CSV_PATH if os.path.exists(LOCAL_CSV_PATH) else REPO_CSV_PATH
 
     if not os.path.exists(file_path):
-        print(f"⚠️ {file_path} not found. Falling back to internal list.")
-        return frozenset()
+        print(f"⚠️️ {file_path} not found. Using verified 210 F&O stock universe.")
+        return CANONICAL_NSE_FO
 
     symbols = set()
     try:
         with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
             lines = [line.strip() for line in f if line.strip()]
 
-        header_idx = -1
-        for idx, line in enumerate(lines[:15]):
-            line_up = line.upper()
-            if "SYMBOL" in line_up or "UNDERLYING" in line_up:
-                header_idx = idx
-                break
+        for line in lines:
+            parts = [p.strip().upper() for p in line.split(",") if p.strip()]
+            for p in parts:
+                if any(x in p for x in ["NIFTY", "BANK", "MIDCP", "BEES", "ETF", "MOM50", "GOLD", "LIQUID", "EXPIRY", "LOT"]):
+                    continue
+                # Match clean tickers and verify against verified F&O master
+                if re.match(r"^[A-Z0-9&-]{2,15}$", p) and p in CANONICAL_NSE_FO:
+                    symbols.add(p)
 
-        if header_idx != -1:
-            csv_data = "\n".join(lines[header_idx:])
-            df = pd.read_csv(io.StringIO(csv_data), skipinitialspace=True)
-            df.columns = [str(c).strip().upper() for c in df.columns]
-
-            target_col = None
-            for candidate in ["SYMBOL", "UNDERLYING", "SECURITY"]:
-                for c in df.columns:
-                    if candidate in c:
-                        target_col = c
-                        break
-                if target_col:
-                    break
-
-            if target_col:
-                raw_syms = df[target_col].dropna().astype(str).str.strip().str.upper().unique()
-                symbols = {
-                    s for s in raw_syms 
-                    if s and s.isalnum() and not any(idx in s for idx in ["NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY"])
-                }
-
-        # Backup line scanner if standard CSV parsing fell short
-        if len(symbols) < 100:
-            for line in lines:
-                parts = [p.strip().upper() for p in line.split(",") if p.strip()]
-                for p in parts:
-                    if re.match(r"^[A-Z0-9&-]{2,15}$", p):
-                        if not any(idx in p for idx in ["NIFTY", "EXPIRY", "LOT", "SYMBOL", "UNDERLYING", "DERIVATIVES", "NAME"]):
-                            symbols.add(p)
-
-        print(f"✅ Successfully loaded {len(symbols)} pure F&O symbols from {file_path}")
-        return frozenset(symbols)
+        if len(symbols) >= 50:
+            print(f"✅ Loaded {len(symbols)} verified F&O symbols from {file_path}")
+            return frozenset(symbols)
 
     except Exception as e:
-        print(f"⚠️ Error parsing fo_mktlots.csv: {e}")
-        return frozenset()
+        print(f"⚠️ Warning while parsing fo_mktlots.csv: {e}")
+
+    return CANONICAL_NSE_FO
 
 
 def compute_indicators(df: pd.DataFrame) -> pd.DataFrame:
@@ -95,14 +99,14 @@ def compute_indicators(df: pd.DataFrame) -> pd.DataFrame:
     close = df['Close']
     close_prev = close.shift(1)
 
-    # 1. ATR(14)
+    # 1. ATR 14
     tr1 = high - low
     tr2 = (high - close_prev).abs()
     tr3 = (low - close_prev).abs()
     tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
     df['ATR'] = tr.ewm(alpha=1/ATR_PERIOD, min_periods=ATR_PERIOD, adjust=False).mean()
 
-    # 2. RVOL (Current Volume / 20-day Volume SMA)
+    # 2. RVOL (Volume / 20-day Volume SMA)
     vol_sma20 = df['Volume'].rolling(window=RVOL_PERIOD, min_periods=5).mean()
     df['RVOL'] = (df['Volume'] / (vol_sma20 + 1e-5)).round(2)
 
@@ -153,8 +157,8 @@ def run_scanner():
         .str.replace(r"\.EQ$", "", regex=True)
     )
 
-    if universe:
-        df_raw = df_raw[df_raw["Symbol_Clean"].isin(universe)].copy()
+    # STRICT: Never allow open scans without F&O filter
+    df_raw = df_raw[df_raw["Symbol_Clean"].isin(universe)].copy()
 
     df_raw["Date_DT"] = pd.to_datetime(df_raw["Date"])
     latest_date_str = df_raw["Date_DT"].max().strftime("%d-%m-%Y")
@@ -184,16 +188,16 @@ def run_scanner():
             continue
 
         # Volume confirmation
-        vol_confirmed = (rvol >= 1.10)
+        vol_confirmed = (rvol >= 1.05)
 
         # ==========================================================
         # 1. BUY SETUP (10D Low Sweep + Bullish Reclaim + Runway)
         # ==========================================================
         sweep_buy = (l < prior_low) and (c > prior_low)
         lower_wick = min(o, c) - l
-        rejection_buy = (c > o) and ((lower_wick >= (body * 0.35)) or (lower_wick >= (c_range * 0.20)))
-        displacement_buy = (c >= (h - (c_range * 0.35))) and (c > prev['High'])
-        supply_safe_buy = (c >= major_supply) or ((major_supply - c) >= (1.2 * atr))
+        rejection_buy = (c > o) and ((lower_wick >= (body * 0.30)) or (lower_wick >= (c_range * 0.20)))
+        displacement_buy = (c >= (h - (c_range * 0.40)))
+        supply_safe_buy = (c >= major_supply) or ((major_supply - c) >= (1.0 * atr))
 
         if sweep_buy and rejection_buy and displacement_buy and vol_confirmed and supply_safe_buy:
             sl = round(l - (1.0 * atr), 2)
@@ -221,9 +225,9 @@ def run_scanner():
         # ==========================================================
         grab_sell = (h > prior_high) and (c < prior_high)
         upper_wick = h - max(o, c)
-        rejection_sell = (c < o) and ((upper_wick >= (body * 0.35)) or (upper_wick >= (c_range * 0.20)))
-        displacement_sell = (c <= (l + (c_range * 0.35))) and (c < prev['Low'])
-        demand_safe_sell = (c <= major_demand) or ((c - major_demand) >= (1.2 * atr))
+        rejection_sell = (c < o) and ((upper_wick >= (body * 0.30)) or (upper_wick >= (c_range * 0.20)))
+        displacement_sell = (c <= (l + (c_range * 0.40)))
+        demand_safe_sell = (c <= major_demand) or ((c - major_demand) >= (1.0 * atr))
 
         if grab_sell and rejection_sell and displacement_sell and vol_confirmed and demand_safe_sell:
             sl = round(h + (1.0 * atr), 2)
@@ -272,7 +276,7 @@ def run_scanner():
         combined = pd.DataFrame(columns=clean_cols)
 
     combined.to_csv(SIGNALS_CSV, index=False)
-    print(f"✅ Scan Complete: {len(today_df)} Institutional setups recorded for {latest_date_str}.")
+    print(f"✅ Scan Complete: {len(today_df)} Institutional F&O setups recorded for {latest_date_str}.")
 
     records = today_df.to_dict('records') if not today_df.empty else []
     try:
@@ -305,7 +309,7 @@ def send_telegram_alert(sig: dict):
         f"• <b>Target (TP)   :</b> ₹{target:.2f} (Strict 1:2)\n\n"
         f"🛡️ <b>CONFIRMATIONS</b>\n"
         f"• 10-Day Local Liquidity Sweep & Reclaim: ✅\n"
-        f"• 1.2x ATR HTF Structural Clearance: ✅\n"
+        f"• 1.0x ATR HTF Structural Clearance: ✅\n"
         f"━━━━━━━━━━━━━━━━━━━━\n"
         f"📈 <a href='{chart_url}'>Open TradingView Chart</a>"
     )
@@ -327,7 +331,7 @@ def send_summary_telegram(records: list, date_str: str):
         f"━━━━━━━━━━━━━━━━━━━━\n"
         f"📊 <b>Total Setups Triggered:</b> {len(records)}\n"
         f"🟢 <b>Buy Sweeps:</b> {buys}  |  🔴 <b>Sell Grabs:</b> {sells}\n"
-        f"🏛️ <b>Strategy:</b> 10D Liquidity Sweep + Reclaim + 1:2 R:R\n"
+        f"🏛️ <b>Universe:</b> Strictly NSE F&O (No ETFs)\n"
         f"🌐 <a href='{DASHBOARD_URL}'>Open Terminal Dashboard</a>\n"
         f"━━━━━━━━━━━━━━━━━━━━"
     )
