@@ -14,8 +14,13 @@ from datetime import datetime
 DB_PATH = "data/candles.duckdb"
 SIGNALS_CSV = "data/signals.csv"
 
-LOCAL_CSV_PATH = r"D:\Scanner\fo_mktlots.csv"
-REPO_CSV_PATH = "fo_mktlots.csv"
+# Check root, subfolders, and local D:\ drive
+POSSIBLE_PATHS = [
+    "fo_mktlots.csv",
+    r"D:\Scanner\fo_mktlots.csv",
+    os.path.join(os.path.dirname(__file__), "fo_mktlots.csv"),
+    ".github/workflows/fo_mktlots.csv"
+]
 
 ATR_PERIOD = 14
 RVOL_PERIOD = 20
@@ -29,7 +34,7 @@ TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN") or os.getenv("TELEGRAM_TOKE
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID") or os.getenv("CHAT_ID")
 DASHBOARD_URL = "https://brahmastra-tech.github.io/brahmastra-scanner/"
 
-# Canonical 210 NSE F&O Universe (Ensures non-F&O/ETFs like MOM50 are completely blocked)
+# 210 Canonical NSE F&O Universe Fallback
 CANONICAL_NSE_FO = frozenset({
     "AARTIIND", "ABB", "ABBOTINDIA", "ABCAPITAL", "ABFRL", "ACC", "ADANIENT",
     "ADANIPORTS", "ALKEM", "AMBUJACEM", "APOLLOHOSP", "APOLLOTYRE", "ASHOKLEY",
@@ -61,45 +66,49 @@ CANONICAL_NSE_FO = frozenset({
 
 
 def load_fo_universe() -> frozenset:
-    """Reads D:\Scanner\fo_mktlots.csv or repo copy with strict equity F&O validation."""
-    file_path = LOCAL_CSV_PATH if os.path.exists(LOCAL_CSV_PATH) else REPO_CSV_PATH
+    target_path = next((p for p in POSSIBLE_PATHS if os.path.exists(p)), None)
 
-    if not os.path.exists(file_path):
-        print(f"⚠️️ {file_path} not found. Using verified 210 F&O stock universe.")
+    if not target_path:
+        print("⚠️ fo_mktlots.csv not found. Using canonical 210 F&O list.")
         return CANONICAL_NSE_FO
 
     symbols = set()
     try:
-        with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
+        with open(target_path, "r", encoding="utf-8", errors="ignore") as f:
             lines = [line.strip() for line in f if line.strip()]
 
         for line in lines:
             parts = [p.strip().upper() for p in line.split(",") if p.strip()]
             for p in parts:
-                if any(x in p for x in ["NIFTY", "BANK", "MIDCP", "BEES", "ETF", "MOM50", "GOLD", "LIQUID", "EXPIRY", "LOT"]):
+                # Exclude ETFs, Index derivatives, and non-equity tokens
+                if any(x in p for x in ["NIFTY", "BANK", "MIDCP", "BEES", "ETF", "MOM", "GOLD", "LIQUID", "EXPIRY", "LOT", "SYMBOL", "UNDERLYING"]):
                     continue
-                # Match clean tickers and verify against verified F&O master
-                if re.match(r"^[A-Z0-9&-]{2,15}$", p) and p in CANONICAL_NSE_FO:
-                    symbols.add(p)
+                clean = re.sub(r"[^A-Z0-9&-]", "", p)
+                if len(clean) >= 2:
+                    symbols.add(clean)
 
-        if len(symbols) >= 50:
-            print(f"✅ Loaded {len(symbols)} verified F&O symbols from {file_path}")
+        # Cross-validate against canonical list or ensure healthy count
+        intersection = symbols.intersection(CANONICAL_NSE_FO)
+        if len(intersection) >= 50:
+            print(f"✅ Loaded {len(intersection)} verified F&O stocks from {target_path}")
+            return frozenset(intersection)
+        elif len(symbols) >= 50:
+            print(f"✅ Loaded {len(symbols)} pure stocks from {target_path}")
             return frozenset(symbols)
 
     except Exception as e:
-        print(f"⚠️ Warning while parsing fo_mktlots.csv: {e}")
+        print(f"⚠️ Error reading fo_mktlots.csv: {e}")
 
     return CANONICAL_NSE_FO
 
 
 def compute_indicators(df: pd.DataFrame) -> pd.DataFrame:
-    """Calculates ATR(14), RVOL(20), 10D Local Liquidity, and 20D HTF structure levels."""
     high = df['High']
     low = df['Low']
     close = df['Close']
     close_prev = close.shift(1)
 
-    # 1. ATR 14
+    # 1. ATR(14)
     tr1 = high - low
     tr2 = (high - close_prev).abs()
     tr3 = (low - close_prev).abs()
@@ -159,6 +168,7 @@ def run_scanner():
 
     # STRICT: Never allow open scans without F&O filter
     df_raw = df_raw[df_raw["Symbol_Clean"].isin(universe)].copy()
+    print(f"🎯 Evaluating {df_raw['Symbol_Clean'].nunique()} pure F&O candidates in database...")
 
     df_raw["Date_DT"] = pd.to_datetime(df_raw["Date"])
     latest_date_str = df_raw["Date_DT"].max().strftime("%d-%m-%Y")
@@ -187,7 +197,7 @@ def run_scanner():
         if pd.isna(atr) or pd.isna(prior_low) or pd.isna(major_supply):
             continue
 
-        # Volume confirmation
+        # Volume threshold
         vol_confirmed = (rvol >= 1.05)
 
         # ==========================================================
